@@ -1,8 +1,14 @@
 /**
- * Integration Management Client for SynapCores SDK
+ * Integration Management Client for SynapCores SDK.
+ *
+ * v0.2.0: gateway v1.5.0-ce uses {integration_type} (a slug) as the path
+ * parameter, not arbitrary IDs. Webhooks, stats, logs, events and
+ * execution history routes do not exist on the gateway, so those methods
+ * now throw a ValidationError. New methods: listTypes() and audit().
  */
 
 import { SynapCores } from './client';
+import { ValidationError } from './errors';
 import {
   Integration,
   CreateIntegrationOptions,
@@ -18,11 +24,31 @@ import {
   TestIntegrationResult,
 } from './types/integrations';
 
+const NOT_SUPPORTED = 'not supported in v1.5.0-ce — see SynapCores integrations API';
+
+export interface IntegrationTypeInfo {
+  type: string;
+  display_name?: string;
+  description?: string;
+  config_schema?: any;
+}
+
+export interface IntegrationAuditEntry {
+  id?: string;
+  type: string;
+  action: string;
+  user?: string;
+  timestamp: Date;
+  details?: any;
+}
+
 export class IntegrationClient {
   constructor(private readonly synapCores: SynapCores) {}
 
   /**
-   * Create a new integration
+   * Create a new integration. Gateway v1.5.0-ce keys integrations by
+   * `type` (slug). The body still carries the type so old call sites
+   * remain backwards compatible.
    */
   async create(options: CreateIntegrationOptions): Promise<Integration> {
     const { data } = await this.synapCores._getHttpClient().post('/integrations', {
@@ -38,7 +64,7 @@ export class IntegrationClient {
   }
 
   /**
-   * List integrations with optional filters
+   * List integrations (optional filters).
    */
   async list(options: ListIntegrationsOptions = {}): Promise<Integration[]> {
     const params = new URLSearchParams();
@@ -52,91 +78,49 @@ export class IntegrationClient {
       params.append('tags', options.tags.join(','));
     }
 
+    const qs = params.toString();
     const { data } = await this.synapCores._getHttpClient().get(
-      `/integrations?${params.toString()}`
+      `/integrations${qs ? `?${qs}` : ''}`,
     );
 
-    return (data.integrations || data).map((integration: any) =>
-      this.mapIntegration(integration)
+    return (data.integrations || data || []).map((integration: any) =>
+      this.mapIntegration(integration),
     );
   }
 
   /**
-   * Get a specific integration by ID
+   * Get a specific integration by type-slug.
    */
-  async get(id: string): Promise<Integration> {
-    const { data } = await this.synapCores._getHttpClient().get(`/integrations/${id}`);
+  async get(type: string): Promise<Integration> {
+    const { data } = await this.synapCores._getHttpClient().get(
+      `/integrations/${type}`,
+    );
     return this.mapIntegration(data);
   }
 
   /**
-   * Update an existing integration
+   * Update an existing integration by type-slug.
    */
   async update(
-    id: string,
-    updates: Partial<CreateIntegrationOptions>
+    type: string,
+    updates: Partial<CreateIntegrationOptions>,
   ): Promise<Integration> {
     const { data } = await this.synapCores._getHttpClient().put(
-      `/integrations/${id}`,
-      updates
+      `/integrations/${type}`,
+      updates,
     );
     return this.mapIntegration(data);
   }
 
   /**
-   * Delete an integration
+   * Delete an integration by type-slug.
    */
-  async delete(id: string): Promise<void> {
-    await this.synapCores._getHttpClient().delete(`/integrations/${id}`);
+  async delete(type: string): Promise<void> {
+    await this.synapCores._getHttpClient().delete(`/integrations/${type}`);
   }
 
   /**
-   * Activate an integration
-   */
-  async activate(id: string): Promise<Integration> {
-    const { data } = await this.synapCores._getHttpClient().post(
-      `/integrations/${id}/activate`
-    );
-    return this.mapIntegration(data);
-  }
-
-  /**
-   * Deactivate an integration
-   */
-  async deactivate(id: string): Promise<Integration> {
-    const { data } = await this.synapCores._getHttpClient().post(
-      `/integrations/${id}/deactivate`
-    );
-    return this.mapIntegration(data);
-  }
-
-  /**
-   * Execute an integration
-   */
-  async execute(options: ExecuteIntegrationOptions): Promise<IntegrationExecutionResult> {
-    const { data } = await this.synapCores._getHttpClient().post(
-      `/integrations/${options.integration}/execute`,
-      {
-        payload: options.payload,
-        config_override: options.config_override,
-        sync: options.sync !== false,
-      }
-    );
-
-    return {
-      id: data.id || data.execution_id,
-      success: data.success,
-      response: data.response,
-      status_code: data.status_code,
-      error: data.error,
-      execution_time_ms: data.execution_time_ms || data.took_ms || 0,
-      retry_count: data.retry_count || 0,
-      executed_at: data.executed_at ? new Date(data.executed_at) : new Date(),
-    };
-  }
-
-  /**
-   * Test an integration without executing
+   * Test an integration connection.
    */
   async test(options: TestIntegrationOptions): Promise<TestIntegrationResult> {
     const { data } = await this.synapCores._getHttpClient().post(
@@ -144,7 +128,7 @@ export class IntegrationClient {
       {
         payload: options.payload,
         validate_only: options.validate_only || false,
-      }
+      },
     );
 
     return {
@@ -157,187 +141,111 @@ export class IntegrationClient {
   }
 
   /**
-   * Get integration execution history
+   * List supported integration types and their config schemas.
    */
+  async listTypes(): Promise<IntegrationTypeInfo[]> {
+    const { data } = await this.synapCores._getHttpClient().get('/integrations/types');
+    return (data.types ?? data ?? []).map((t: any) => ({
+      type: t.type ?? t.name,
+      display_name: t.display_name ?? t.label,
+      description: t.description,
+      config_schema: t.config_schema ?? t.schema,
+    }));
+  }
+
+  /**
+   * Get the integrations audit trail.
+   */
+  async audit(options: { limit?: number; type?: string } = {}): Promise<IntegrationAuditEntry[]> {
+    const params = new URLSearchParams();
+    if (options.limit) params.append('limit', options.limit.toString());
+    if (options.type) params.append('type', options.type);
+    const qs = params.toString();
+    const { data } = await this.synapCores._getHttpClient().get(
+      `/integrations/audit${qs ? `?${qs}` : ''}`,
+    );
+    return (data.entries ?? data.audit ?? data ?? []).map((row: any) => ({
+      id: row.id,
+      type: row.type ?? row.integration_type,
+      action: row.action ?? row.event,
+      user: row.user ?? row.actor,
+      timestamp: new Date(row.timestamp ?? row.created_at ?? Date.now()),
+      details: row.details ?? row.data,
+    }));
+  }
+
+  // -------------------------------------------------------------------
+  // Methods removed from v1.5.0-ce (gateway has no matching route).
+  // We keep the names for backwards-compat but throw a clear error.
+  // -------------------------------------------------------------------
+
+  async activate(_type: string): Promise<Integration> {
+    throw new ValidationError(`integrations.activate() ${NOT_SUPPORTED} — use update() with {activate:true}`);
+  }
+
+  async deactivate(_type: string): Promise<Integration> {
+    throw new ValidationError(`integrations.deactivate() ${NOT_SUPPORTED} — use update() with {activate:false}`);
+  }
+
+  async execute(_options: ExecuteIntegrationOptions): Promise<IntegrationExecutionResult> {
+    throw new ValidationError(`integrations.execute() ${NOT_SUPPORTED}`);
+  }
+
   async getExecutionHistory(
-    integrationId: string,
-    options: { limit?: number; offset?: number } = {}
+    _type: string,
+    _options: { limit?: number; offset?: number } = {},
   ): Promise<IntegrationExecutionResult[]> {
-    const params = new URLSearchParams();
-    if (options.limit) params.append('limit', options.limit.toString());
-    if (options.offset) params.append('offset', options.offset.toString());
-
-    const { data } = await this.synapCores._getHttpClient().get(
-      `/integrations/${integrationId}/executions?${params.toString()}`
-    );
-
-    return (data.executions || data).map((exec: any) => ({
-      id: exec.id || exec.execution_id,
-      success: exec.success,
-      response: exec.response,
-      status_code: exec.status_code,
-      error: exec.error,
-      execution_time_ms: exec.execution_time_ms || exec.took_ms || 0,
-      retry_count: exec.retry_count || 0,
-      executed_at: exec.executed_at ? new Date(exec.executed_at) : new Date(),
-    }));
+    throw new ValidationError(`integrations.getExecutionHistory() ${NOT_SUPPORTED}`);
   }
 
-  /**
-   * Get integration statistics
-   */
-  async getStats(integrationId: string): Promise<IntegrationStats> {
-    const { data } = await this.synapCores._getHttpClient().get(
-      `/integrations/${integrationId}/stats`
-    );
-
-    return {
-      integration_id: integrationId,
-      total_executions: data.total_executions || 0,
-      successful_executions: data.successful_executions || 0,
-      failed_executions: data.failed_executions || 0,
-      avg_execution_time_ms: data.avg_execution_time_ms || 0,
-      executions_24h: data.executions_24h || 0,
-      uptime_percentage: data.uptime_percentage || 0,
-      last_success_at: data.last_success_at ? new Date(data.last_success_at) : undefined,
-      last_error_at: data.last_error_at ? new Date(data.last_error_at) : undefined,
-    };
+  async getStats(_type: string): Promise<IntegrationStats> {
+    throw new ValidationError(`integrations.getStats() ${NOT_SUPPORTED}`);
   }
 
-  /**
-   * Create a webhook for an integration
-   */
-  async createWebhook(options: CreateWebhookOptions): Promise<IntegrationWebhook> {
-    const { data } = await this.synapCores._getHttpClient().post('/integrations/webhooks', {
-      integration_id: options.integration_id,
-      event: options.event,
-      url: options.url,
-      secret: options.secret,
-      activate: options.activate !== false,
-    });
-
-    return {
-      id: data.id,
-      integration_id: data.integration_id,
-      event: data.event,
-      url: data.url,
-      active: data.active,
-      secret: data.secret,
-      created_at: new Date(data.created_at),
-    };
+  async createWebhook(_options: CreateWebhookOptions): Promise<IntegrationWebhook> {
+    throw new ValidationError(`integrations.createWebhook() ${NOT_SUPPORTED}`);
   }
 
-  /**
-   * List webhooks for an integration
-   */
-  async listWebhooks(integrationId: string): Promise<IntegrationWebhook[]> {
-    const { data } = await this.synapCores._getHttpClient().get(
-      `/integrations/${integrationId}/webhooks`
-    );
-
-    return (data.webhooks || data).map((webhook: any) => ({
-      id: webhook.id,
-      integration_id: webhook.integration_id,
-      event: webhook.event,
-      url: webhook.url,
-      active: webhook.active,
-      secret: webhook.secret,
-      created_at: new Date(webhook.created_at),
-    }));
+  async listWebhooks(_type: string): Promise<IntegrationWebhook[]> {
+    throw new ValidationError(`integrations.listWebhooks() ${NOT_SUPPORTED}`);
   }
 
-  /**
-   * Delete a webhook
-   */
-  async deleteWebhook(webhookId: string): Promise<void> {
-    await this.synapCores._getHttpClient().delete(`/integrations/webhooks/${webhookId}`);
+  async deleteWebhook(_webhookId: string): Promise<void> {
+    throw new ValidationError(`integrations.deleteWebhook() ${NOT_SUPPORTED}`);
   }
 
-  /**
-   * Get integration events
-   */
   async getEvents(
-    integrationId: string,
-    options: { limit?: number; status?: string } = {}
+    _type: string,
+    _options: { limit?: number; status?: string } = {},
   ): Promise<IntegrationEvent[]> {
-    const params = new URLSearchParams();
-    if (options.limit) params.append('limit', options.limit.toString());
-    if (options.status) params.append('status', options.status);
-
-    const { data } = await this.synapCores._getHttpClient().get(
-      `/integrations/${integrationId}/events?${params.toString()}`
-    );
-
-    return (data.events || data).map((event: any) => ({
-      id: event.id,
-      integration_id: event.integration_id,
-      event: event.event,
-      data: event.data,
-      timestamp: new Date(event.timestamp),
-      status: event.status,
-      error: event.error,
-    }));
+    throw new ValidationError(`integrations.getEvents() ${NOT_SUPPORTED}`);
   }
 
-  /**
-   * Get integration logs
-   */
   async getLogs(
-    integrationId: string,
-    options: { limit?: number; level?: string } = {}
+    _type: string,
+    _options: { limit?: number; level?: string } = {},
   ): Promise<IntegrationLog[]> {
-    const params = new URLSearchParams();
-    if (options.limit) params.append('limit', options.limit.toString());
-    if (options.level) params.append('level', options.level);
+    throw new ValidationError(`integrations.getLogs() ${NOT_SUPPORTED}`);
+  }
 
-    const { data } = await this.synapCores._getHttpClient().get(
-      `/integrations/${integrationId}/logs?${params.toString()}`
-    );
-
-    return (data.logs || data).map((log: any) => ({
-      id: log.id,
-      integration_id: log.integration_id,
-      level: log.level,
-      message: log.message,
-      data: log.data,
-      timestamp: new Date(log.timestamp),
-    }));
+  async retryExecution(_executionId: string): Promise<IntegrationExecutionResult> {
+    throw new ValidationError(`integrations.retryExecution() ${NOT_SUPPORTED}`);
   }
 
   /**
-   * Retry a failed execution
-   */
-  async retryExecution(executionId: string): Promise<IntegrationExecutionResult> {
-    const { data } = await this.synapCores._getHttpClient().post(
-      `/integrations/executions/${executionId}/retry`
-    );
-
-    return {
-      id: data.id || data.execution_id,
-      success: data.success,
-      response: data.response,
-      status_code: data.status_code,
-      error: data.error,
-      execution_time_ms: data.execution_time_ms || data.took_ms || 0,
-      retry_count: data.retry_count || 0,
-      executed_at: data.executed_at ? new Date(data.executed_at) : new Date(),
-    };
-  }
-
-  /**
-   * Map raw integration data to Integration type
+   * Map raw integration data to Integration type.
    */
   private mapIntegration(data: any): Integration {
     return {
-      id: data.id,
-      name: data.name,
+      id: data.id ?? data.type,
+      name: data.name ?? data.type,
       type: data.type,
-      status: data.status,
-      config: data.config,
+      status: data.status ?? (data.active ? 'active' : 'inactive'),
+      config: data.config ?? {},
       description: data.description,
       tags: data.tags || [],
-      created_at: new Date(data.created_at),
-      updated_at: new Date(data.updated_at),
+      created_at: new Date(data.created_at ?? Date.now()),
+      updated_at: new Date(data.updated_at ?? data.created_at ?? Date.now()),
       last_success_at: data.last_success_at ? new Date(data.last_success_at) : undefined,
       last_error: data.last_error,
       execution_count: data.execution_count,

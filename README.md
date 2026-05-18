@@ -2,6 +2,94 @@
 
 Official Node.js/TypeScript SDK for SynapCores AI-Native Database Management System - A SQL 2026-compliant database with native tenant isolation, AI/ML functions, and multimedia support.
 
+> **0.2.0 — gateway v1.5.0-ce alignment.** This release rewires every
+> module against the v1.5.0-ce route surface: AutoML moved from `/ai/*`
+> to `/automl/*`, vector ops collapsed onto `/vector-algebra/operation`,
+> WebSocket auth now uses ticket exchange, and we ship eight new top-level
+> modules: `graph`, `nl2sql`, `filesystem`, `chat`, `multimodal`,
+> `system`, `transactions`, and `mcp`. See "What's new in 0.2.0" below.
+
+## What's new in 0.2.0
+
+```typescript
+import { SynapCores } from '@synapcores/sdk';
+
+const client = new SynapCores({
+  host: 'localhost', port: 8080,
+  apiKey: 'ak_prod_xxx...',
+});
+
+// 1. Cypher-style graph traversal
+const friends = await client.graph.cypher(
+  'MATCH (u:User {id:$id})-[:FRIEND]->(f) RETURN f',
+  { id: 'u-123' },
+);
+
+// 2. Natural language → SQL (with optional execution)
+const ans = await client.nl2sql.ask(
+  'top 10 customers by revenue this quarter',
+  { execute: true },
+);
+console.log(ans.sql, ans.rows);
+
+// 3. AI chat sessions with streaming
+const session = await client.chat.sessions.create({ model: 'gpt-4o' });
+for await (const chunk of client.chat.stream(session.id, 'Summarize today\'s alerts')) {
+  if (chunk.delta) process.stdout.write(chunk.delta);
+}
+
+// 4. Filesystem-backed RAG collections with progress
+const fs = await client.filesystem.collections.create({
+  name: 'docs', path: '/data/docs', watch: true,
+});
+for await (const evt of client.filesystem.collections.subscribeProgress(fs.id)) {
+  console.log(evt.status, evt.progress, evt.filename);
+}
+
+// 5. Server-side transactions with savepoints
+const tx = await client.transactions.begin({ isolation_level: 'SERIALIZABLE' });
+try {
+  await tx.execute('UPDATE accounts SET balance = balance - $1 WHERE id = $2', [100, 'a']);
+  await tx.savepoint('mid');
+  await tx.execute('UPDATE accounts SET balance = balance + $1 WHERE id = $2', [100, 'b']);
+  await tx.commit();
+} catch (e) {
+  if (tx.isActive()) await tx.rollback();
+  throw e;
+}
+```
+
+Other new surfaces:
+
+- `client.multimodal.{similarity,search,join,embed}` for cross-modal retrieval.
+- `client.system.vision.{get,set,delete,test}` for the admin vision config.
+- `client.mcp.{invoke,batch,info}` for the Model Context Protocol gateway.
+
+### Breaking changes vs 0.1.0
+
+- `embed()` now hits `/ai/embeddings` (single) / `/ai/embeddings/batch`.
+- `automl.*` paths moved from `/ai/*` to `/automl/*`.
+- All vector math (`vectorAdd`, `cosineSimilarity`, …) goes through
+  `POST /vector-algebra/operation` with an `op` discriminator.
+- `knnSearch`/`rangeSearch`/`hybridSearch` POST to
+  `/vectors/collections/:c/search` with a `mode` field.
+- `prepareStatement`/`executePrepared`/`deallocatePrepared` use
+  `POST /query/{prepare,exec,close}`.
+- `import.import()` only routes to `/data/import/csv` or `/data/import/json`.
+  The old `/import/*`, `/export/*`, validate, template and bulk-job
+  endpoints throw `ValidationError` since they were removed in v1.5.0-ce.
+- `backup.cancelBackup`, `backup.cancelRestore` and `backup.getMetrics`
+  removed (no longer exist server-side).
+- `integrations.*` keys integrations by **type slug**, not arbitrary id;
+  webhooks/stats/logs/events/execution-history methods now throw
+  `ValidationError` because the gateway has no matching routes.
+- `subscription` (and the new `filesystem` progress stream) authenticate
+  by exchanging a JWT/API-key for a short-lived WS ticket via
+  `POST /v1/ws/ticket`, then connecting to `/ws?token=...` (or the
+  `/ws/filesystem-collections/:id/progress?token=...` channel).
+- `refreshToken()` no longer hits a `/auth/refresh` endpoint — pass the
+  username/password (or call `login()` again).
+
 ## Features
 
 - 🚀 **Full TypeScript Support**: Complete type definitions for excellent IDE experience
@@ -1003,9 +1091,14 @@ const result = await client.listCollectionsDetailed(); // Returns detailed info
 
 For detailed API documentation and the complete integration guide, visit:
 - **Database Integration Guide**: See `databaseintegrationguide.md`
-- **API Documentation**: [https://docs.synapcores.ai](https://docs.synapcores.ai)
+- **API Documentation**: [https://synapcores.com/developers](https://synapcores.com/developers)
 
 ## License
 
 MIT License - see LICENSE file for details.
 
+## Support
+
+- **Issues**: [GitHub Issues](https://github.com/synapcores/nodejs-sdk/issues)
+- **Documentation**: [https://synapcores.com/developers](https://synapcores.com/developers)
+- **Email**: release@synapcores.com

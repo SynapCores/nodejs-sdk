@@ -9,8 +9,9 @@ import { SynapCores } from '@synapcores/sdk';
 
 async function main() {
   // Get API key from environment variable (recommended for production)
-  // You can set this with: export AIDB_API_KEY="aidb_sk_your_key_here"
-  const apiKey = process.env.AIDB_API_KEY || 'aidb_sk_demo_key_12345'; // Replace with your actual key
+  // API keys can start with 'ak_' (ak_prod_...) or 'aidb_' (legacy format)
+  // You can set this with: export AIDB_API_KEY="ak_prod_your_key_here"
+  const apiKey = process.env.AIDB_API_KEY || 'ak_prod_demo_key_12345'; // Replace with your actual key
 
   if (!process.env.AIDB_API_KEY) {
     console.log('Warning: AIDB_API_KEY environment variable not set');
@@ -32,18 +33,25 @@ async function main() {
     const collections = await client.listCollections();
     console.log('📚 Available collections:', collections);
 
-    // Execute a simple query
-    const result = await client.sql('SELECT 1 as test, NOW() as current_time');
-    console.log('🔍 Query result:', result.rows);
+    // Execute a simple query using the new executeQuery method
+    const result = await client.executeQuery({
+      sql: 'SELECT 1 as test, NOW() as current_time',
+      parameters: [],
+    });
+    console.log('🔍 Query columns:', result.columns.map(c => c.name));
+    console.log('🔍 Query rows:', result.rows);
 
     // Test permissions by trying to create a collection
     // This will fail if the API key has ReadOnly permission
     try {
-      const testCollection = await client.createCollection({
+      const testCollection = await client.createCollectionWithSchema({
         name: 'test_api_key_collection',
+        description: 'Test collection for API key validation',
         schema: {
-          id: 'integer',
-          data: 'string',
+          fields: [
+            { name: 'id', type: 'string', required: true },
+            { name: 'data', type: 'string', required: true },
+          ],
         },
       });
       console.log('✅ API key has write permissions - collection created');
@@ -51,17 +59,17 @@ async function main() {
       // Clean up
       await client.deleteCollection('test_api_key_collection');
     } catch (error: any) {
-      if (error.code === 'FORBIDDEN' || error.message.includes('permission')) {
+      if (error.code === 'FORBIDDEN' || error.message.includes('permission') || error.name === 'AuthenticationError') {
         console.log('ℹ️ API key has read-only permissions:', error.message);
       } else {
         throw error;
       }
     }
   } catch (error: any) {
-    if (error.code === 'AUTH_FAILED' || error.code === 'FORBIDDEN') {
+    if (error.code === 'AUTH_ERROR' || error.code === 'AUTH_FAILED' || error.name === 'AuthenticationError') {
       console.error('❌ Authentication failed:', error.message);
       console.log('Please check that:');
-      console.log("1. Your API key is valid and starts with 'aidb_'");
+      console.log("1. Your API key is valid and starts with 'ak_' or 'aidb_'");
       console.log('2. The API key has not expired');
       console.log('3. The API key is active (not revoked)');
     } else {

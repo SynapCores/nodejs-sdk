@@ -13,15 +13,22 @@ async function main() {
   });
 
   try {
-    // Create a collection
-    const products = await client.createCollection({
+    // Create a collection with new schema format
+    const products = await client.createCollectionWithSchema({
       name: 'products',
+      description: 'Product catalog with embeddings',
       schema: {
-        name: 'string',
-        description: 'text',
-        price: 'float',
-        category: 'string',
-        embedding: 'vector[384]',
+        fields: [
+          { name: 'name', type: 'string', required: true },
+          { name: 'description', type: 'string', required: false },
+          { name: 'price', type: 'number', required: true },
+          { name: 'category', type: 'string', required: true },
+          { name: 'embedding', type: 'vector', required: false },
+        ],
+        indexes: [
+          { name: 'category_idx', fields: ['category'], type: 'btree' },
+          { name: 'vector_idx', fields: ['embedding'], type: 'vector' },
+        ],
       },
     });
 
@@ -64,17 +71,31 @@ async function main() {
       );
     }
 
-    // SQL query with AI extensions
+    // SQL query with AI extensions using new executeQuery method
     console.log('\n📊 Running SQL query with embeddings...');
-    const queryResult = await client.sql(`
-      SELECT name, price,
-             similarity(embedding, embed('gaming accessories')) as relevance
-      FROM products
-      WHERE category = 'Electronics' AND price < 100
-      ORDER BY relevance DESC
-    `);
+    const queryResult = await client.executeQuery({
+      sql: `
+        SELECT name, price,
+               COSINE_SIMILARITY(embedding, EMBED('gaming accessories', 'minilm')) as relevance
+        FROM products
+        WHERE category = 'Electronics' AND price < 100
+        ORDER BY relevance DESC
+        LIMIT 10
+      `,
+      parameters: [],
+      max_rows: 10,
+    });
 
-    console.table(queryResult.rows);
+    // Convert array rows to readable format
+    const columnNames = queryResult.columns.map(c => c.name);
+    const rows = queryResult.rows.map(row => {
+      const obj: Record<string, any> = {};
+      columnNames.forEach((name, idx) => {
+        obj[name] = row[idx];
+      });
+      return obj;
+    });
+    console.table(rows);
 
     // NLP analysis
     console.log('\n🧠 Analyzing product reviews...');

@@ -1,5 +1,8 @@
 /**
  * AutoML client for SynapCores SDK
+ *
+ * v0.2.0: paths migrated from /ai/* to /automl/* to match gateway
+ * v1.5.0-ce. Async training is just /automl/train + polling /automl/jobs/:id.
  */
 
 import { SynapCores } from './client';
@@ -34,14 +37,11 @@ export class AutoMLModel {
     const inputs = isSingle ? [data] : data;
 
     const response = await this.client.synapCores._getHttpClient().post(
-      '/ai/predict',
-      {
-        model_id: this.id,
-        inputs,
-      },
+      `/automl/models/${this.id}/predict`,
+      { inputs },
     );
 
-    const predictions = response.data.predictions;
+    const predictions = response.data.predictions ?? response.data;
     return isSingle ? predictions[0] : predictions;
   }
 
@@ -49,9 +49,7 @@ export class AutoMLModel {
     testData: string | Record<string, any>[],
     target?: string,
   ): Promise<EvaluationResult> {
-    const payload: any = {
-      model_id: this.id,
-    };
+    const payload: any = {};
 
     if (typeof testData === 'string') {
       payload.collection = testData;
@@ -63,7 +61,7 @@ export class AutoMLModel {
     }
 
     const { data } = await this.client.synapCores._getHttpClient().post(
-      '/ai/evaluate',
+      `/automl/models/${this.id}/evaluate`,
       payload,
     );
 
@@ -72,7 +70,7 @@ export class AutoMLModel {
 
   async delete(): Promise<void> {
     await this.client.synapCores._getHttpClient().delete(
-      `/ai/models/${this.id}`,
+      `/automl/models/${this.id}`,
     );
   }
 }
@@ -81,7 +79,7 @@ export class AutoMLClient {
   constructor(public readonly synapCores: SynapCores) {}
 
   async train(options: TrainOptions): Promise<AutoMLModel> {
-    const { data } = await this.synapCores._getHttpClient().post('/ai/train', {
+    const { data } = await this.synapCores._getHttpClient().post('/automl/train', {
       collection: options.collection,
       target: options.target,
       features: options.features,
@@ -99,9 +97,9 @@ export class AutoMLClient {
       task: data.task,
       status: data.status,
       accuracy: data.accuracy,
-      createdAt: new Date(data.created_at),
+      createdAt: new Date(data.created_at ?? Date.now()),
       updatedAt: data.updated_at ? new Date(data.updated_at) : undefined,
-      config: data.config,
+      config: data.config ?? {},
     };
 
     return new AutoMLModel(this, modelInfo);
@@ -109,7 +107,7 @@ export class AutoMLClient {
 
   async getModel(modelId: string): Promise<AutoMLModel> {
     const { data } = await this.synapCores._getHttpClient().get(
-      `/ai/models/${modelId}`,
+      `/automl/models/${modelId}`,
     );
 
     const modelInfo: ModelInfo = {
@@ -118,9 +116,9 @@ export class AutoMLClient {
       task: data.task,
       status: data.status,
       accuracy: data.accuracy,
-      createdAt: new Date(data.created_at),
+      createdAt: new Date(data.created_at ?? Date.now()),
       updatedAt: data.updated_at ? new Date(data.updated_at) : undefined,
-      config: data.config,
+      config: data.config ?? {},
     };
 
     return new AutoMLModel(this, modelInfo);
@@ -130,27 +128,30 @@ export class AutoMLClient {
     task?: string;
     status?: string;
   }): Promise<ModelInfo[]> {
-    const { data } = await this.synapCores._getHttpClient().get('/ai/models', {
+    const { data } = await this.synapCores._getHttpClient().get('/automl/models', {
       params: filters,
     });
 
-    return data.models.map((model: any) => ({
+    return (data.models ?? data ?? []).map((model: any) => ({
       id: model.id,
       name: model.name,
       task: model.task,
       status: model.status,
       accuracy: model.accuracy,
-      createdAt: new Date(model.created_at),
+      createdAt: new Date(model.created_at ?? Date.now()),
       updatedAt: model.updated_at ? new Date(model.updated_at) : undefined,
-      config: model.config,
+      config: model.config ?? {},
     }));
   }
 
   /**
-   * Start async training job
+   * Start async training job.
+   *
+   * In v1.5.0-ce there is no separate /train/async endpoint — /automl/train
+   * itself returns a job descriptor when the training is long-running.
    */
   async trainAsync(options: AsyncTrainOptions): Promise<TrainingJob> {
-    const { data } = await this.synapCores._getHttpClient().post('/ai/train/async', {
+    const { data } = await this.synapCores._getHttpClient().post('/automl/train', {
       collection: options.collection,
       target: options.target,
       features: options.features,
@@ -160,26 +161,12 @@ export class AutoMLClient {
       validation_split: options.validationSplit || 0.2,
       max_trials: options.maxTrials || 10,
       timeout_minutes: options.timeoutMinutes || 60,
+      async: true,
       callback_url: options.callback_url,
       webhook_url: options.webhook_url,
     });
 
-    return {
-      id: data.id || data.job_id,
-      name: data.name,
-      status: data.status,
-      progress: data.progress || 0,
-      phase: data.phase,
-      task: data.task,
-      current_trial: data.current_trial,
-      total_trials: data.total_trials || options.maxTrials || 10,
-      best_accuracy: data.best_accuracy,
-      eta_ms: data.eta_ms || data.estimated_time_remaining_ms,
-      error: data.error,
-      started_at: new Date(data.started_at || Date.now()),
-      completed_at: data.completed_at ? new Date(data.completed_at) : undefined,
-      model_id: data.model_id,
-    };
+    return this.mapTrainingJob(data, options.maxTrials || 10);
   }
 
   /**
@@ -187,81 +174,57 @@ export class AutoMLClient {
    */
   async getTrainingJob(jobId: string): Promise<TrainingJob> {
     const { data } = await this.synapCores._getHttpClient().get(
-      `/ai/train/jobs/${jobId}`
+      `/automl/jobs/${jobId}`,
     );
 
-    return {
-      id: data.id || jobId,
-      name: data.name,
-      status: data.status,
-      progress: data.progress || 0,
-      phase: data.phase,
-      task: data.task,
-      current_trial: data.current_trial,
-      total_trials: data.total_trials,
-      best_accuracy: data.best_accuracy,
-      eta_ms: data.eta_ms || data.estimated_time_remaining_ms,
-      error: data.error,
-      started_at: new Date(data.started_at),
-      completed_at: data.completed_at ? new Date(data.completed_at) : undefined,
-      model_id: data.model_id,
-    };
+    return this.mapTrainingJob(data);
   }
 
   /**
    * List training jobs
    */
   async listTrainingJobs(
-    options: ListTrainingJobsOptions = {}
+    options: ListTrainingJobsOptions = {},
   ): Promise<TrainingJob[]> {
     const params = new URLSearchParams();
     if (options.status) params.append('status', options.status);
     if (options.page) params.append('page', options.page.toString());
     if (options.page_size) params.append('page_size', options.page_size.toString());
 
+    const qs = params.toString();
     const { data } = await this.synapCores._getHttpClient().get(
-      `/ai/train/jobs?${params.toString()}`
+      `/automl/jobs${qs ? `?${qs}` : ''}`,
     );
 
-    return (data.jobs || data).map((job: any) => ({
-      id: job.id,
-      name: job.name,
-      status: job.status,
-      progress: job.progress || 0,
-      phase: job.phase,
-      task: job.task,
-      current_trial: job.current_trial,
-      total_trials: job.total_trials,
-      best_accuracy: job.best_accuracy,
-      eta_ms: job.eta_ms || job.estimated_time_remaining_ms,
-      error: job.error,
-      started_at: new Date(job.started_at),
-      completed_at: job.completed_at ? new Date(job.completed_at) : undefined,
-      model_id: job.model_id,
-    }));
+    return (data.jobs ?? data ?? []).map((job: any) => this.mapTrainingJob(job));
   }
 
   /**
-   * Cancel a training job
+   * Cancel/stop a training job
    */
   async cancelTrainingJob(jobId: string): Promise<void> {
-    await this.synapCores._getHttpClient().post(`/ai/train/jobs/${jobId}/cancel`);
+    await this.synapCores._getHttpClient().post(`/automl/jobs/${jobId}/stop`);
   }
 
   /**
-   * Get training metrics for a job
+   * Get training metrics for a job.
+   *
+   * v1.5.0-ce: gateway no longer has a dedicated /metrics route — metrics
+   * (when available) ship inside the /automl/jobs/:id payload as
+   * `metrics` or `trial_metrics`. We just unwrap that field here.
    */
   async getTrainingMetrics(jobId: string): Promise<TrainingMetrics[]> {
     const { data } = await this.synapCores._getHttpClient().get(
-      `/ai/train/jobs/${jobId}/metrics`
+      `/automl/jobs/${jobId}`,
     );
 
-    return (data.metrics || data).map((metric: any) => ({
+    const metrics = data.metrics ?? data.trial_metrics ?? [];
+    return metrics.map((metric: any) => ({
       trial: metric.trial,
       accuracy: metric.accuracy,
       loss: metric.loss,
       metrics: metric.metrics,
-      timestamp: new Date(metric.timestamp),
+      timestamp: new Date(metric.timestamp ?? Date.now()),
     }));
   }
 
@@ -274,7 +237,7 @@ export class AutoMLClient {
       pollInterval?: number;
       timeout?: number;
       onProgress?: (job: TrainingJob) => void;
-    } = {}
+    } = {},
   ): Promise<AutoMLModel> {
     const pollInterval = options.pollInterval || 2000;
     const timeout = options.timeout || 3600000; // 1 hour default
@@ -308,5 +271,24 @@ export class AutoMLClient {
 
       await new Promise((resolve) => setTimeout(resolve, pollInterval));
     }
+  }
+
+  private mapTrainingJob(data: any, fallbackMaxTrials?: number): TrainingJob {
+    return {
+      id: data.id ?? data.job_id,
+      name: data.name,
+      status: data.status,
+      progress: data.progress ?? 0,
+      phase: data.phase,
+      task: data.task,
+      current_trial: data.current_trial,
+      total_trials: data.total_trials ?? fallbackMaxTrials,
+      best_accuracy: data.best_accuracy,
+      eta_ms: data.eta_ms ?? data.estimated_time_remaining_ms,
+      error: data.error,
+      started_at: new Date(data.started_at ?? Date.now()),
+      completed_at: data.completed_at ? new Date(data.completed_at) : undefined,
+      model_id: data.model_id,
+    };
   }
 }

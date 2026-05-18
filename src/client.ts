@@ -11,6 +11,14 @@ import { SchemaClient } from './schema';
 import { ImportExportClient } from './import';
 import { IntegrationClient } from './integrations';
 import { BackupClient } from './backup';
+import { GraphClient } from './graph';
+import { NL2SqlClient } from './nl2sql';
+import { FilesystemCollectionsClient } from './filesystem';
+import { ChatClient } from './chat';
+import { MultimodalClient } from './multimodal';
+import { SystemClient } from './system';
+import { TransactionsClient } from './transactions';
+import { McpClient } from './mcp';
 import {
   SynapCoresConfig,
   QueryResult,
@@ -80,6 +88,14 @@ export class SynapCores {
   public readonly import: ImportExportClient;
   public readonly integrations: IntegrationClient;
   public readonly backup: BackupClient;
+  public readonly graph: GraphClient;
+  public readonly nl2sql: NL2SqlClient;
+  public readonly filesystem: FilesystemCollectionsClient;
+  public readonly chat: ChatClient;
+  public readonly multimodal: MultimodalClient;
+  public readonly system: SystemClient;
+  public readonly transactions: TransactionsClient;
+  public readonly mcp: McpClient;
 
   constructor(config: SynapCoresConfig = {}) {
     this.config = {
@@ -123,7 +139,7 @@ export class SynapCores {
       timeout: this.config.timeout,
       headers: {
         'Content-Type': 'application/json',
-        'User-Agent': 'synapcores-nodejs/0.1.0',
+        'User-Agent': 'synapcores-nodejs/0.2.0',
         ...authHeader,
       },
       ...(httpsAgent && { httpsAgent }),
@@ -143,6 +159,53 @@ export class SynapCores {
     this.import = new ImportExportClient(this);
     this.integrations = new IntegrationClient(this);
     this.backup = new BackupClient(this);
+    this.graph = new GraphClient(this);
+    this.nl2sql = new NL2SqlClient(this);
+    this.filesystem = new FilesystemCollectionsClient(this);
+    this.chat = new ChatClient(this);
+    this.multimodal = new MultimodalClient(this);
+    this.system = new SystemClient(this);
+    this.transactions = new TransactionsClient(this);
+    this.mcp = new McpClient(this);
+  }
+
+  /**
+   * Build the WebSocket base URL (ws:// or wss://).
+   */
+  _getWsBaseUrl(): string {
+    const protocol = this.config.useHttps ? 'wss' : 'ws';
+    return `${protocol}://${this.config.host}:${this.config.port}`;
+  }
+
+  /**
+   * Read-only access to the configured host/port for WS-clients.
+   */
+  _getConfig(): Required<SynapCoresConfig> {
+    return this.config;
+  }
+
+  /**
+   * Exchange the current credentials (JWT or API key) for a short-lived
+   * WebSocket ticket. Use the returned token as the `?token=` query
+   * param when opening any /ws endpoint.
+   */
+  async createWsTicket(): Promise<{ token: string; expiresAt: number }> {
+    const { data } = await this.httpClient.post('/ws/ticket', {});
+    const token = data.token ?? data.ticket;
+    const expiresAt =
+      typeof data.expiresAt === 'number'
+        ? data.expiresAt
+        : data.expires_at
+        ? Date.parse(data.expires_at)
+        : Date.now() + 60_000;
+    return { token, expiresAt };
+  }
+
+  /**
+   * Revoke a previously-issued ticket (best-effort).
+   */
+  async revokeWsTicket(token: string): Promise<void> {
+    await this.httpClient.post('/ws/ticket/revoke', { token });
   }
 
   private handleError(error: AxiosError): never {
@@ -372,12 +435,13 @@ export class SynapCores {
     const isBatch = Array.isArray(text);
     const texts = isBatch ? text : [text];
 
-    const { data } = await this.httpClient.post('/ai/embed', {
-      texts,
-      model: options.model || 'default',
-    });
-
-    return isBatch ? data.embeddings : data.embeddings[0];
+    // v0.2.0: gateway endpoint renamed from /ai/embed to /ai/embeddings
+    // (and /ai/embeddings/batch when len > 1).
+    const path = isBatch ? '/ai/embeddings/batch' : '/ai/embeddings';
+    const body = isBatch ? { texts, model: options.model } : { text: texts[0], model: options.model };
+    const { data } = await this.httpClient.post(path, body);
+    if (isBatch) return data.embeddings ?? data;
+    return data.embedding ?? data.embeddings?.[0] ?? data;
   }
 
   // Internal method for HTTP client access
@@ -525,8 +589,19 @@ export class SynapCores {
    * @returns Promise resolving to table information
    */
   async describeTable(tableName: string): Promise<TableInfo> {
-    const { data } = await this.httpClient.get(`/table/${tableName}/info`);
-    return data;
+    // v0.2.0: gateway uses /schema/tables/:t (the /table/:t/info endpoint
+    // never existed). Compose the full TableInfo from the columns +
+    // indexes side-channel calls.
+    const [tableRes, colsRes, idxRes] = await Promise.all([
+      this.httpClient.get(`/schema/tables/${tableName}`),
+      this.httpClient.get(`/schema/tables/${tableName}/columns`),
+      this.httpClient.get(`/schema/tables/${tableName}/indexes`),
+    ]);
+    return {
+      ...tableRes.data,
+      columns: colsRes.data?.columns ?? colsRes.data ?? [],
+      indexes: idxRes.data?.indexes ?? idxRes.data ?? [],
+    } as TableInfo;
   }
 
   /**
@@ -682,20 +757,30 @@ export class SynapCores {
    * @returns Promise resolving to batch operation result
    */
   async batchInsert(options: BatchInsertOptions): Promise<BatchResult> {
-    const { data } = await this.httpClient.post('/batch/insert', {
-      table_name: options.tableName,
-      columns: options.columns,
-      rows: options.rows,
-      on_conflict: options.onConflict,
-      batch_size: options.batchSize || 1000
+    // v0.2.0: gateway never had /batch/{insert,update,delete}; batched
+    // SQL goes through /query/execute/batch as a list of statements.
+    // Rows can come in as arrays or as keyed records; normalise to
+    // positional arrays aligned with `columns`.
+    const cols: string[] = (options.columns ?? []) as string[];
+    const queries = (options.rows as any[]).map((row: any) => {
+      const values: any[] = Array.isArray(row) ? row : cols.map((c) => row[c]);
+      return {
+        sql: `INSERT INTO ${options.tableName} (${cols.join(', ')}) VALUES (${values.map((_, i) => '$' + (i + 1)).join(', ')})`,
+        parameters: values,
+      };
     });
-
+    const { data } = await this.httpClient.post('/query/execute/batch', {
+      queries,
+      transactional: false,
+    });
+    const results = data.results ?? [];
+    const successful = results.filter((r: any) => !r.error).length;
     return {
-      totalProcessed: data.total_processed,
-      successful: data.successful,
-      failed: data.failed,
-      errors: data.errors,
-      tookMs: data.took_ms
+      totalProcessed: results.length,
+      successful,
+      failed: results.length - successful,
+      errors: results.filter((r: any) => r.error).map((r: any) => r.error),
+      tookMs: data.total_execution_time_ms ?? 0,
     };
   }
 
@@ -705,18 +790,31 @@ export class SynapCores {
    * @returns Promise resolving to batch operation result
    */
   async batchUpdate(options: BatchUpdateOptions): Promise<BatchResult> {
-    const { data } = await this.httpClient.post('/batch/update', {
-      table_name: options.tableName,
-      updates: options.updates,
-      batch_size: options.batchSize || 1000
+    // Each update becomes its own UPDATE ... WHERE statement under
+    // /query/execute/batch.
+    const queries = options.updates.map((u: any) => {
+      const setClause = Object.keys(u.set ?? {})
+        .map((k, i) => `${k} = $${i + 1}`)
+        .join(', ');
+      const setVals = Object.values(u.set ?? {});
+      const whereStr = u.where ?? '1=1';
+      return {
+        sql: `UPDATE ${options.tableName} SET ${setClause} WHERE ${whereStr}`,
+        parameters: setVals,
+      };
     });
-
+    const { data } = await this.httpClient.post('/query/execute/batch', {
+      queries,
+      transactional: false,
+    });
+    const results = data.results ?? [];
+    const successful = results.filter((r: any) => !r.error).length;
     return {
-      totalProcessed: data.total_processed,
-      successful: data.successful,
-      failed: data.failed,
-      errors: data.errors,
-      tookMs: data.took_ms
+      totalProcessed: results.length,
+      successful,
+      failed: results.length - successful,
+      errors: results.filter((r: any) => r.error).map((r: any) => r.error),
+      tookMs: data.total_execution_time_ms ?? 0,
     };
   }
 
@@ -726,18 +824,22 @@ export class SynapCores {
    * @returns Promise resolving to batch operation result
    */
   async batchDelete(options: BatchDeleteOptions): Promise<BatchResult> {
-    const { data } = await this.httpClient.post('/batch/delete', {
-      table_name: options.tableName,
-      where_conditions: options.whereConditions,
-      batch_size: options.batchSize || 1000
+    const queries = ((options.whereConditions ?? []) as any[]).map((cond: any) => ({
+      sql: `DELETE FROM ${options.tableName} WHERE ${typeof cond === 'string' ? cond : JSON.stringify(cond)}`,
+      parameters: [] as any[],
+    }));
+    const { data } = await this.httpClient.post('/query/execute/batch', {
+      queries,
+      transactional: false,
     });
-
+    const results = data.results ?? [];
+    const successful = results.filter((r: any) => !r.error).length;
     return {
-      totalProcessed: data.total_processed,
-      successful: data.successful,
-      failed: data.failed,
-      errors: data.errors,
-      tookMs: data.took_ms
+      totalProcessed: results.length,
+      successful,
+      failed: results.length - successful,
+      errors: results.filter((r: any) => r.error).map((r: any) => r.error),
+      tookMs: data.total_execution_time_ms ?? 0,
     };
   }
 
@@ -752,16 +854,17 @@ export class SynapCores {
    * @returns Promise resolving to prepared statement
    */
   async prepareStatement(sql: string, options: PreparedStatementOptions = {}): Promise<PreparedStatement> {
-    const { data } = await this.httpClient.post('/prepare', {
+    // v0.2.0: gateway routes are /query/{prepare,exec,close} (POST only).
+    const { data } = await this.httpClient.post('/query/prepare', {
       sql,
       name: options.name,
       parameter_types: options.parameterTypes
     });
 
     const prepared: PreparedStatement = {
-      id: data.statement_id,
+      id: data.statement_id ?? data.id,
       sql: sql,
-      parameterCount: data.parameter_count
+      parameterCount: data.parameter_count ?? data.parameters_count ?? 0,
     };
 
     if (options.name) {
@@ -783,7 +886,7 @@ export class SynapCores {
       statementId = this.preparedStatements.get(statementId)!.id;
     }
 
-    const { data } = await this.httpClient.post('/execute-prepared', {
+    const { data } = await this.httpClient.post('/query/exec', {
       statement_id: statementId,
       parameters: params
     });
@@ -803,12 +906,13 @@ export class SynapCores {
    * @returns Promise resolving when statement is deallocated
    */
   async deallocatePrepared(statementId: string): Promise<void> {
+    // v0.2.0: gateway uses POST /query/close, not DELETE /prepare/:id.
     if (this.preparedStatements.has(statementId)) {
       const prepared = this.preparedStatements.get(statementId)!;
-      await this.httpClient.delete(`/prepare/${prepared.id}`);
+      await this.httpClient.post('/query/close', { statement_id: prepared.id });
       this.preparedStatements.delete(statementId);
     } else {
-      await this.httpClient.delete(`/prepare/${statementId}`);
+      await this.httpClient.post('/query/close', { statement_id: statementId });
     }
   }
 
@@ -925,258 +1029,183 @@ export class SynapCores {
       throw new VectorError('Vector dimensions must match', 'DIMENSION_MISMATCH');
     }
 
-    const { data } = await this.httpClient.post('/vectors/add', {
-      vector1,
-      vector2
+    // v0.2.0: gateway exposes a single /vector-algebra/operation endpoint
+    // with an `op` discriminator instead of one route per math op.
+    const { data } = await this.httpClient.post('/vector-algebra/operation', {
+      op: 'add', a: vector1, b: vector2,
     });
-
+    const result = data.result ?? data.vector ?? [];
     return {
-      result: { values: data.result, dimensions: data.result.length },
+      result: { values: result, dimensions: result.length },
       operation: 'addition',
-      tookMs: data.took_ms
+      tookMs: data.took_ms,
     };
   }
 
   /**
    * Performs vector subtraction
-   * @param vector1 - First vector (minuend)
-   * @param vector2 - Second vector (subtrahend)
-   * @returns Promise resolving to vector subtraction result
    */
   async vectorSubtract(vector1: number[], vector2: number[]): Promise<VectorArithmeticResult> {
     if (vector1.length !== vector2.length) {
       throw new VectorError('Vector dimensions must match', 'DIMENSION_MISMATCH');
     }
-
-    const { data } = await this.httpClient.post('/vectors/subtract', {
-      vector1,
-      vector2
+    const { data } = await this.httpClient.post('/vector-algebra/operation', {
+      op: 'subtract', a: vector1, b: vector2,
     });
-
+    const result = data.result ?? data.vector ?? [];
     return {
-      result: { values: data.result, dimensions: data.result.length },
+      result: { values: result, dimensions: result.length },
       operation: 'subtraction',
-      tookMs: data.took_ms
+      tookMs: data.took_ms,
     };
   }
 
   /**
    * Performs scalar multiplication on a vector
-   * @param vector - Input vector
-   * @param scalar - Scalar value to multiply by
-   * @returns Promise resolving to scalar multiplication result
    */
   async vectorScalarMultiply(vector: number[], scalar: number): Promise<VectorArithmeticResult> {
-    const { data } = await this.httpClient.post('/vectors/scalar-multiply', {
-      vector,
-      scalar
+    const { data } = await this.httpClient.post('/vector-algebra/operation', {
+      op: 'scalar_multiply', a: vector, scalar,
     });
-
+    const result = data.result ?? data.vector ?? [];
     return {
-      result: { values: data.result, dimensions: data.result.length },
+      result: { values: result, dimensions: result.length },
       operation: 'scalar_multiplication',
-      tookMs: data.took_ms
+      tookMs: data.took_ms,
     };
   }
 
   /**
    * Calculates the dot product of two vectors
-   * @param vector1 - First vector
-   * @param vector2 - Second vector
-   * @returns Promise resolving to dot product result
    */
   async vectorDotProduct(vector1: number[], vector2: number[]): Promise<{ dotProduct: number; tookMs: number }> {
     if (vector1.length !== vector2.length) {
       throw new VectorError('Vector dimensions must match', 'DIMENSION_MISMATCH');
     }
-
-    const { data } = await this.httpClient.post('/vectors/dot-product', {
-      vector1,
-      vector2
+    const { data } = await this.httpClient.post('/vector-algebra/operation', {
+      op: 'dot_product', a: vector1, b: vector2,
     });
-
-    return {
-      dotProduct: data.dot_product,
-      tookMs: data.took_ms
-    };
+    return { dotProduct: data.scalar ?? data.dot_product ?? 0, tookMs: data.took_ms };
   }
 
   /**
    * Calculates cosine similarity between two vectors
-   * @param vector1 - First vector
-   * @param vector2 - Second vector
-   * @returns Promise resolving to cosine similarity result
    */
   async cosineSimilarity(vector1: number[], vector2: number[]): Promise<VectorSimilarityResult> {
     if (vector1.length !== vector2.length) {
       throw new VectorError('Vector dimensions must match', 'DIMENSION_MISMATCH');
     }
-
-    const { data } = await this.httpClient.post('/vectors/cosine-similarity', {
-      vector1,
-      vector2
+    const { data } = await this.httpClient.post('/vector-algebra/operation', {
+      op: 'cosine_similarity', a: vector1, b: vector2,
     });
-
-    return {
-      similarity: data.similarity,
-      function: 'cosine',
-      tookMs: data.took_ms
-    };
+    return { similarity: data.scalar ?? data.similarity ?? 0, function: 'cosine', tookMs: data.took_ms };
   }
 
   /**
    * Calculates L2 (Euclidean) distance between two vectors
-   * @param vector1 - First vector
-   * @param vector2 - Second vector
-   * @returns Promise resolving to L2 distance result
    */
   async l2Distance(vector1: number[], vector2: number[]): Promise<VectorSimilarityResult> {
     if (vector1.length !== vector2.length) {
       throw new VectorError('Vector dimensions must match', 'DIMENSION_MISMATCH');
     }
-
-    const { data } = await this.httpClient.post('/vectors/l2-distance', {
-      vector1,
-      vector2
+    const { data } = await this.httpClient.post('/vector-algebra/operation', {
+      op: 'l2_distance', a: vector1, b: vector2,
     });
-
-    return {
-      distance: data.distance,
-      similarity: data.distance, // Include similarity for compatibility
-      function: 'l2',
-      tookMs: data.took_ms
-    };
+    const distance = data.scalar ?? data.distance ?? 0;
+    return { distance, similarity: distance, function: 'l2', tookMs: data.took_ms };
   }
 
   /**
    * Calculates inner product between two vectors
-   * @param vector1 - First vector
-   * @param vector2 - Second vector
-   * @returns Promise resolving to inner product result
    */
   async innerProduct(vector1: number[], vector2: number[]): Promise<VectorSimilarityResult> {
     if (vector1.length !== vector2.length) {
       throw new VectorError('Vector dimensions must match', 'DIMENSION_MISMATCH');
     }
-
-    const { data } = await this.httpClient.post('/vectors/inner-product', {
-      vector1,
-      vector2
+    const { data } = await this.httpClient.post('/vector-algebra/operation', {
+      op: 'inner_product', a: vector1, b: vector2,
     });
-
-    return {
-      similarity: data.inner_product,
-      function: 'inner_product',
-      tookMs: data.took_ms
-    };
+    return { similarity: data.scalar ?? data.inner_product ?? 0, function: 'inner_product', tookMs: data.took_ms };
   }
 
   /**
-   * Performs K-nearest neighbors vector search
-   * @param options - KNN search options
-   * @returns Promise resolving to KNN search results
+   * Performs K-nearest neighbors vector search.
+   * v0.2.0: routes through /vectors/collections/:c/search with mode discriminator.
    */
   async knnSearch(options: KNNSearchOptions): Promise<VectorSearchResult[]> {
-    const { data } = await this.httpClient.post('/vectors/knn-search', {
-      query_vector: options.queryVector,
-      k: options.k,
-      table_name: options.tableName,
-      vector_column: options.vectorColumn,
-      metadata_columns: options.metadataColumns,
-      filter: options.filter
+    const collection = (options as any).collectionName ?? options.tableName;
+    const { data } = await this.httpClient.post(`/vectors/collections/${collection}/search`, {
+      mode: 'knn',
+      vector: options.queryVector,
+      limit: options.k,
+      filter: options.filter,
     });
-
-    return data.results.map((result: any) => ({
-      id: result.id,
-      vector: result.vector,
-      similarity: result.similarity,
-      distance: result.distance,
-      metadata: result.metadata
+    return (data.matches ?? data.results ?? []).map((r: any) => ({
+      id: r.id, vector: r.vector, similarity: r.similarity, distance: r.distance, metadata: r.metadata,
     }));
   }
 
   /**
-   * Performs range-based vector similarity search
-   * @param options - Range search options
-   * @returns Promise resolving to range search results
+   * Performs range-based vector similarity search.
    */
   async rangeSearch(options: RangeSearchOptions): Promise<VectorSearchResult[]> {
-    const { data } = await this.httpClient.post('/vectors/range-search', {
-      query_vector: options.queryVector,
+    const collection = (options as any).collectionName ?? options.tableName;
+    const { data } = await this.httpClient.post(`/vectors/collections/${collection}/search`, {
+      mode: 'range',
+      vector: options.queryVector,
       threshold: options.threshold,
-      table_name: options.tableName,
-      vector_column: options.vectorColumn,
-      metadata_columns: options.metadataColumns,
+      max_results: options.maxResults,
       filter: options.filter,
-      max_results: options.maxResults
     });
-
-    return data.results.map((result: any) => ({
-      id: result.id,
-      vector: result.vector,
-      similarity: result.similarity,
-      distance: result.distance,
-      metadata: result.metadata
+    return (data.matches ?? data.results ?? []).map((r: any) => ({
+      id: r.id, vector: r.vector, similarity: r.similarity, distance: r.distance, metadata: r.metadata,
     }));
   }
 
   /**
-   * Performs hybrid search combining vector similarity and SQL filtering
-   * @param options - Hybrid search options
-   * @returns Promise resolving to hybrid search results
+   * Performs hybrid search combining vector similarity and SQL filtering.
    */
   async hybridSearch(options: HybridSearchOptions): Promise<VectorSearchResult[]> {
-    const { data } = await this.httpClient.post('/vectors/hybrid-search', {
+    const collection = (options as any).collectionName ?? (options as any).tableName;
+    const { data } = await this.httpClient.post(`/vectors/collections/${collection}/search`, {
+      mode: 'hybrid',
       vector: options.vector,
       text_query: options.textQuery,
       sql_filter: options.sqlFilter,
-      k: options.k,
+      limit: options.k,
       threshold: options.threshold,
       metric: options.metric,
       filter: options.filter,
-      weights: options.weights
+      weights: options.weights,
     });
-
-    return data.results.map((result: any) => ({
-      id: result.id,
-      vector: result.vector,
-      similarity: result.similarity,
-      distance: result.distance,
-      metadata: result.metadata
+    return (data.matches ?? data.results ?? []).map((r: any) => ({
+      id: r.id, vector: r.vector, similarity: r.similarity, distance: r.distance, metadata: r.metadata,
     }));
   }
 
   /**
    * Normalizes a vector to unit length
-   * @param vector - Input vector to normalize
-   * @returns Promise resolving to normalized vector
    */
   async normalizeVector(vector: number[]): Promise<VectorArithmeticResult> {
-    const { data } = await this.httpClient.post('/vectors/normalize', {
-      vector
+    const { data } = await this.httpClient.post('/vector-algebra/operation', {
+      op: 'normalize', a: vector,
     });
-
+    const result = data.result ?? data.vector ?? [];
     return {
-      result: { values: data.result, dimensions: data.result.length },
+      result: { values: result, dimensions: result.length },
       operation: 'normalization',
-      tookMs: data.took_ms
+      tookMs: data.took_ms,
     };
   }
 
   /**
    * Calculates the magnitude (length) of a vector
-   * @param vector - Input vector
-   * @returns Promise resolving to vector magnitude
    */
   async vectorMagnitude(vector: number[]): Promise<{ magnitude: number; tookMs: number }> {
-    const { data } = await this.httpClient.post('/vectors/magnitude', {
-      vector
+    const { data } = await this.httpClient.post('/vector-algebra/operation', {
+      op: 'magnitude', a: vector,
     });
-
-    return {
-      magnitude: data.magnitude,
-      tookMs: data.took_ms
-    };
+    return { magnitude: data.scalar ?? data.magnitude ?? 0, tookMs: data.took_ms };
   }
 
   // =================================================================
@@ -1217,19 +1246,26 @@ export class SynapCores {
   }
 
   /**
-   * Refresh JWT token
+   * Refresh JWT token.
+   *
+   * v0.2.0: the gateway does not currently expose a refresh endpoint —
+   * this method now re-runs login() with the same credentials. Pass
+   * the credentials in the call site (or supply them at SDK construction
+   * time and we'll re-use the cached pair).
    */
-  async refreshToken(): Promise<RefreshResponse> {
-    const { data } = await this.httpClient.post<RefreshResponse>('/auth/refresh');
-    
-    // Update JWT token in config
-    if (data.access_token) {
-      this.config.jwtToken = data.access_token;
-      this.httpClient.defaults.headers['Authorization'] = `Bearer ${data.access_token}`;
-      delete this.httpClient.defaults.headers['X-API-Key'];
+  async refreshToken(credentials?: { username?: string; password?: string }): Promise<RefreshResponse> {
+    if (credentials?.username && credentials?.password) {
+      const login = await this.login({ username: credentials.username, password: credentials.password });
+      return {
+        access_token: login.access_token,
+        refresh_token: '',
+        token_type: 'Bearer',
+        expires_in: login.expires_in,
+      } as RefreshResponse;
     }
-    
-    return data;
+    throw new ValidationError(
+      'refreshToken now requires credentials — the gateway has no /auth/refresh endpoint in v1.5.0-ce. Pass {username, password} or call login() again.'
+    );
   }
 
   /**

@@ -1,6 +1,6 @@
 {
   "name": "@synapcores/sdk",
-  "version": "0.1.0",
+  "version": "0.2.1",
   "description": "Official Node.js/TypeScript SDK for SynapCores AI-Native Database",
   "main": "dist/index.js",
   "module": "dist/index.mjs",
@@ -38,7 +38,7 @@
     "semantic",
     "synapcores"
   ],
-  "author": "SynapCores Team <support@synapcores.ai>",
+  "author": "SynapCores Team <release@synapcores.com>",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -47,7 +47,7 @@
   "bugs": {
     "url": "https://github.com/synapcores/nodejs-sdk/issues"
   },
-  "homepage": "https://synapcores.ai",
+  "homepage": "https://synapcores.com",
   "engines": {
     "node": ">=16.0.0"
   },

@@ -1,6 +1,6 @@
 /**
  * SynapCores Node.js/TypeScript SDK
- * 
+ *
  * Official SDK for SynapCores AI-Native Database Management System.
  */
 
@@ -14,6 +14,16 @@ export { ImportExportClient } from './import';
 export { IntegrationClient } from './integrations';
 export { BackupClient } from './backup';
 export { Subscription } from './subscription';
+
+// v0.2.0: new top-level modules.
+export { GraphClient } from './graph';
+export { NL2SqlClient } from './nl2sql';
+export { FilesystemCollectionsClient } from './filesystem';
+export { ChatClient } from './chat';
+export { MultimodalClient } from './multimodal';
+export { SystemClient } from './system';
+export { TransactionsClient, Tx } from './transactions';
+export { McpClient } from './mcp';
 
 // Export types
 export type {
@@ -196,6 +206,71 @@ export type {
   StorageConfig,
 } from './types/backup';
 
+// v0.2.0 module types
+export type {
+  GraphNode,
+  GraphEdge,
+  CypherResult,
+  CypherProfileResult,
+  GraphAlgorithmName,
+  GraphAlgorithmRequest,
+  GraphAlgorithmResult,
+  GraphSummary,
+  GraphExtractRequest,
+  GraphExtractResult,
+} from './types/graph';
+
+export type {
+  Nl2SqlAskOptions,
+  Nl2SqlAskResult,
+  Nl2SqlSchemaContext,
+  Nl2SqlHistoryEntry,
+  Nl2SqlValidateResult,
+} from './types/nl2sql';
+
+export type {
+  FsCollection,
+  CreateFsCollectionOptions,
+  FsDocument,
+  FsProgressEvent,
+} from './types/filesystem';
+
+export type {
+  ChatSession,
+  CreateChatSessionOptions,
+  ChatMessage,
+  SendChatOptions,
+  SendChatResult,
+  ChatStreamChunk,
+  ChatSuggestion,
+  ChatSuggestionsOptions,
+  ChatModelInfo,
+  ChatSystemPrompt,
+  ChatTool,
+  ChatCacheStats,
+} from './types/chat';
+
+export type {
+  MultimodalInput,
+  MultimodalSimilarityOptions,
+  MultimodalSimilarityResult,
+  MultimodalSearchOptions,
+  MultimodalSearchHit,
+  MultimodalJoinOptions,
+  MultimodalJoinResult,
+  MultimodalEmbedResult,
+} from './types/multimodal';
+
+export type { VisionConfig, VisionTestResult } from './types/system';
+
+export type {
+  BeginTransactionOptions,
+  TxQueryResult,
+  TxHistoryEntry,
+} from './types/transactions';
+
+export type { McpRequest, McpResponse, McpInfo } from './types/mcp';
+
 // Export errors
 export {
   SynapCoresError,
@@ -216,4 +291,4 @@ export {
 export { z } from 'zod';
 
 // Version
-export const VERSION = '0.1.0';
+export const VERSION = '0.2.0';

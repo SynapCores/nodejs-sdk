@@ -26,7 +26,7 @@ export interface NLPAnalysis {
 
 export interface AnalyzeOptions {
   text: string | string[];
-  tasks?: Array<'sentiment' | 'entities' | 'summary' | 'keywords'>;
+  tasks?: Array<'sentiment' | 'entities' | 'summary' | 'summarize' | 'keywords'>;
   language?: string;
 }
 

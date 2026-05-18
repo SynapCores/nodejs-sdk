@@ -1,5 +1,9 @@
 /**
- * NLP client for SynapCores SDK
+ * NLP client for SynapCores SDK.
+ *
+ * v0.2.0: replaced /ai/analyze (which never existed in v1.5.0-ce) with a
+ * client-side fan-out to /ai/sentiment + /ai/entities + /ai/summarize.
+ * Added qa() for question-answering against the new /ai/qa route.
  */
 
 import { SynapCores } from './client';
@@ -15,39 +19,83 @@ import {
 export class NLPClient {
   constructor(private readonly synapCores: SynapCores) {}
 
+  /**
+   * Run multiple NLP tasks in parallel and stitch them into a single
+   * NLPAnalysis (or array of them, matching the input shape).
+   */
   async analyze(options: AnalyzeOptions): Promise<NLPAnalysis | NLPAnalysis[]> {
     const isBatch = Array.isArray(options.text);
-    const texts = isBatch ? options.text : [options.text];
+    const texts = (isBatch ? options.text : [options.text]) as string[];
+    const tasks = options.tasks || ['sentiment', 'entities', 'summarize'];
+    const http = this.synapCores._getHttpClient();
 
-    const { data } = await this.synapCores._getHttpClient().post('/ai/analyze', {
-      texts,
-      tasks: options.tasks || ['sentiment', 'entities', 'keywords'],
-      language: options.language,
-    });
+    const wantSentiment = tasks.includes('sentiment');
+    const wantEntities = tasks.includes('entities');
+    const wantSummarize = tasks.includes('summarize') || tasks.includes('summary');
+    const wantKeywords = tasks.includes('keywords');
 
-    const results = data.results.map((r: any) => ({
-      sentiment: r.sentiment
-        ? {
-            label: r.sentiment.label,
-            score: r.sentiment.score,
-            confidence: r.sentiment.confidence,
-          }
-        : undefined,
-      entities: r.entities
-        ? r.entities.map((e: any) => ({
-            text: e.text,
-            type: e.type,
-            start: e.start,
-            end: e.end,
-            score: e.score,
-          }))
-        : undefined,
-      summary: r.summary,
-      keywords: r.keywords,
-      language: r.language,
-    }));
+    const results: NLPAnalysis[] = await Promise.all(
+      texts.map(async (text) => {
+        const out: NLPAnalysis = {};
+        const calls: Array<Promise<void>> = [];
 
-    return isBatch ? results : results[0];
+        if (wantSentiment) {
+          calls.push(
+            http.post('/ai/sentiment', { texts: [text], language: options.language })
+              .then(({ data }) => {
+                const s = (data.sentiments ?? [])[0] ?? data.sentiment ?? data;
+                if (s) {
+                  out.sentiment = {
+                    label: s.label,
+                    score: s.score,
+                    confidence: s.confidence,
+                  };
+                }
+              })
+              .catch(() => undefined),
+          );
+        }
+
+        if (wantEntities) {
+          calls.push(
+            http.post('/ai/entities', { text, language: options.language })
+              .then(({ data }) => {
+                const arr = data.entities ?? [];
+                out.entities = arr.map((e: any) => ({
+                  text: e.text,
+                  type: e.type,
+                  start: e.start,
+                  end: e.end,
+                  score: e.score,
+                }));
+              })
+              .catch(() => undefined),
+          );
+        }
+
+        if (wantSummarize) {
+          calls.push(
+            http.post('/ai/summarize', { text })
+              .then(({ data }) => {
+                out.summary = data.summary;
+              })
+              .catch(() => undefined),
+          );
+        }
+
+        if (wantKeywords) {
+          // No dedicated keywords endpoint in v1.5.0-ce — leave the field
+          // unset so callers can detect lack of support without throwing.
+          out.keywords = undefined;
+        }
+
+        await Promise.all(calls);
+        return out;
+      }),
+    );
+
+    if (isBatch) return results;
+    return results[0] ?? {};
   }
 
   async summarize(options: SummarizeOptions): Promise<string> {
@@ -69,7 +117,7 @@ export class NLPClient {
       entity_types: entityTypes,
     });
 
-    return data.entities.map((e: any) => ({
+    return (data.entities ?? []).map((e: any) => ({
       text: e.text,
       type: e.type,
       start: e.start,
@@ -86,7 +134,7 @@ export class NLPClient {
       texts,
     });
 
-    const results = data.sentiments.map((s: any) => ({
+    const results = (data.sentiments ?? []).map((s: any) => ({
       label: s.label,
       score: s.score,
       confidence: s.confidence,
@@ -108,5 +156,26 @@ export class NLPClient {
     });
 
     return isBatch ? data.classifications : data.classifications[0];
+  }
+
+  /**
+   * Question-answering against an optional context window.
+   */
+  async qa(
+    question: string,
+    context?: string,
+    opts: { maxAnswerTokens?: number } = {},
+  ): Promise<{ answer: string; score?: number; start?: number; end?: number }> {
+    const { data } = await this.synapCores._getHttpClient().post('/ai/qa', {
+      question,
+      context,
+      max_answer_tokens: opts.maxAnswerTokens,
+    });
+    return {
+      answer: data.answer ?? data.text ?? '',
+      score: data.score ?? data.confidence,
+      start: data.start,
+      end: data.end,
+    };
   }
 }

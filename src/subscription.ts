@@ -1,5 +1,9 @@
 /**
- * Real-time subscription support for SynapCores SDK
+ * Real-time subscription support for SynapCores SDK.
+ *
+ * v0.2.0: WebSocket auth uses the ticket exchange flow.
+ *   1. POST /v1/ws/ticket -> {token, expiresAt}
+ *   2. Open `ws://host:port/ws?token={ticket}`  (note: root /ws, not /v1/ws)
  */
 
 import WebSocket from 'ws';
@@ -33,16 +37,20 @@ export class Subscription extends EventEmitter {
   }
 
   private async createConnection(): Promise<void> {
-    const client = (this.collection as any).client;
-    const protocol = client.config.useHttps ? 'wss' : 'ws';
-    const url = `${protocol}://${client.config.host}:${client.config.port}/v1/ws`;
+    const client: any = (this.collection as any).client;
+    // Mint a fresh WS ticket using the SDK auth context.
+    const { token } = await client.createWsTicket();
 
-    const headers: Record<string, string> = {};
-    if (client.config.apiKey) {
-      headers['Authorization'] = `Bearer ${client.config.apiKey}`;
-    }
+    const wsBase: string = client._getWsBaseUrl
+      ? client._getWsBaseUrl()
+      : (() => {
+          const cfg = client.config ?? client._getConfig();
+          const protocol = cfg.useHttps ? 'wss' : 'ws';
+          return `${protocol}://${cfg.host}:${cfg.port}`;
+        })();
+    const url = `${wsBase}/ws?token=${encodeURIComponent(token)}`;
 
-    this.ws = new WebSocket(url, { headers });
+    this.ws = new WebSocket(url);
 
     this.ws.on('open', () => {
       this.reconnectAttempts = 0;

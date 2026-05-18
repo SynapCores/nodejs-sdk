@@ -14,7 +14,6 @@ import {
   BackupSchedule,
   CreateScheduleOptions,
   BackupVerificationResult,
-  BackupMetrics,
 } from './types/backup';
 
 export class BackupClient {
@@ -154,19 +153,9 @@ export class BackupClient {
     };
   }
 
-  /**
-   * Cancel a backup in progress
-   */
-  async cancelBackup(backupId: string): Promise<void> {
-    await this.synapCores._getHttpClient().post(`/backups/${backupId}/cancel`);
-  }
-
-  /**
-   * Cancel a restore in progress
-   */
-  async cancelRestore(restoreId: string): Promise<void> {
-    await this.synapCores._getHttpClient().post(`/backups/restore/${restoreId}/cancel`);
-  }
+  // cancelBackup() / cancelRestore() removed — gateway v1.5.0-ce has no
+  // /backups/:id/cancel or /backups/restore/:id/cancel routes. Use
+  // delete() to clean up an aborted backup record.
 
   /**
    * Download a backup file
@@ -340,25 +329,8 @@ export class BackupClient {
     };
   }
 
-  /**
-   * Get backup metrics
-   */
-  async getMetrics(): Promise<BackupMetrics> {
-    const { data } = await this.synapCores._getHttpClient().get('/backups/metrics');
-
-    return {
-      total_backups: data.total_backups || 0,
-      total_size_bytes: data.total_size_bytes || 0,
-      successful_backups: data.successful_backups || 0,
-      failed_backups: data.failed_backups || 0,
-      avg_backup_size_bytes: data.avg_backup_size_bytes || 0,
-      avg_duration_ms: data.avg_duration_ms || 0,
-      last_backup_at: data.last_backup_at ? new Date(data.last_backup_at) : undefined,
-      next_scheduled_at: data.next_scheduled_at
-        ? new Date(data.next_scheduled_at)
-        : undefined,
-    };
-  }
+  // getMetrics() removed — gateway v1.5.0-ce has no /backups/metrics route.
+  // Aggregate metrics can be derived client-side from list().
 
   /**
    * Map raw backup data to Backup type
