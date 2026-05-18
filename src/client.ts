@@ -139,7 +139,7 @@ export class SynapCores {
       timeout: this.config.timeout,
       headers: {
         'Content-Type': 'application/json',
-        'User-Agent': 'synapcores-nodejs/0.2.0',
+        'User-Agent': 'synapcores-nodejs/0.3.0',
         ...authHeader,
       },
       ...(httpsAgent && { httpsAgent }),
@@ -332,11 +332,28 @@ export class SynapCores {
     }
 
     const { data } = await this.httpClient.get(`/collections/${name}`);
-    
+
     const collection = new Collection(this, name, data.schema);
     this.collectionsCache.set(name, collection);
-    
+
     return collection;
+  }
+
+  /**
+   * Synchronous accessor that returns a Collection handle without round-tripping
+   * to the gateway. Use this when you already know the collection exists and just
+   * want to issue a vectorSearch / search / insert against it.
+   *
+   * v0.3.0: added so `client.collection(name).vectorSearch(...)` works without
+   * a preceding await on getCollection().
+   */
+  collection(name: string): Collection {
+    if (this.collectionsCache.has(name)) {
+      return this.collectionsCache.get(name)!;
+    }
+    const c = new Collection(this, name);
+    this.collectionsCache.set(name, c);
+    return c;
   }
 
   /**
@@ -344,11 +361,15 @@ export class SynapCores {
    */
   async listCollections(): Promise<string[]> {
     const result = await this.listCollectionsDetailed();
-    return result.collections.map(c => c.name);
+    return (result.collections ?? []).map(c => c.name);
   }
 
   /**
    * List collections with detailed information matching the database integration guide format
+   *
+   * v0.3.0: gateway returns an envelope { data: { items, total, page, page_size, ... }, meta }.
+   * We normalise that into the SDK's { collections, total, page, pageSize } shape and also
+   * accept legacy { collections: [...] } / bare arrays for forward-compat.
    */
   async listCollectionsDetailed(options?: {
     page?: number;
@@ -364,10 +385,22 @@ export class SynapCores {
     if (options?.sortBy) params.append('sortBy', options.sortBy);
     if (options?.sortOrder) params.append('sortOrder', options.sortOrder);
 
-    const { data } = await this.httpClient.get<ListCollectionsResponse>(
+    const { data } = await this.httpClient.get<any>(
       `/collections${params.toString() ? `?${params.toString()}` : ''}`
     );
-    return data;
+
+    // Unwrap envelope: gateway v1.6.5 returns { data: { items, ... }, meta }.
+    const inner = data?.data ?? data;
+    const items: any[] = Array.isArray(inner)
+      ? inner
+      : (inner?.items ?? inner?.collections ?? []);
+
+    return {
+      collections: items,
+      total: inner?.total ?? items.length,
+      page: inner?.page ?? 1,
+      pageSize: inner?.page_size ?? inner?.pageSize ?? items.length,
+    };
   }
   
   async getDocuments(collectionName: string, page: number, pageSize: number): Promise<Document[]> {

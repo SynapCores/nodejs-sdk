@@ -1,6 +1,6 @@
 {
   "name": "@synapcores/sdk",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Official Node.js/TypeScript SDK for SynapCores AI-Native Database",
   "main": "dist/index.js",
   "module": "dist/index.mjs",
@@ -27,7 +27,8 @@
   "files": [
     "dist",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "CHANGELOG.md"
   ],
   "keywords": [
     "database",

@@ -145,13 +145,14 @@ class GraphAlgorithmsApi {
 class GraphsApi {
   constructor(private readonly synapCores: SynapCores) {}
 
+  // v0.3.0: gateway routes live under /graph/graphs, not /graphs.
   async list(): Promise<GraphSummary[]> {
-    const { data } = await this.synapCores._getHttpClient().get('/graphs');
+    const { data } = await this.synapCores._getHttpClient().get('/graph/graphs');
     return (data.graphs ?? data ?? []).map((g: any) => this.normalize(g));
   }
 
   async create(name: string, opts: { description?: string } = {}): Promise<GraphSummary> {
-    const { data } = await this.synapCores._getHttpClient().post('/graphs', {
+    const { data } = await this.synapCores._getHttpClient().post('/graph/graphs', {
       name,
       description: opts.description,
     });
@@ -159,12 +160,12 @@ class GraphsApi {
   }
 
   async get(name: string): Promise<GraphSummary> {
-    const { data } = await this.synapCores._getHttpClient().get(`/graphs/${name}`);
+    const { data } = await this.synapCores._getHttpClient().get(`/graph/graphs/${name}`);
     return this.normalize(data);
   }
 
   async delete(name: string): Promise<void> {
-    await this.synapCores._getHttpClient().delete(`/graphs/${name}`);
+    await this.synapCores._getHttpClient().delete(`/graph/graphs/${name}`);
   }
 
   private normalize(data: any): GraphSummary {

@@ -106,22 +106,48 @@ export class AutoMLClient {
   }
 
   async getModel(modelId: string): Promise<AutoMLModel> {
-    const { data } = await this.synapCores._getHttpClient().get(
-      `/automl/models/${modelId}`,
-    );
+    // v0.3.0: GET /automl/models/:id can return 404 even when /predict works
+    // (the gateway's model index doesn't always include models loaded via
+    // the recipe / training pipeline). Fall back to a stub ModelInfo so the
+    // caller can still invoke .predict() / .evaluate() against the id.
+    try {
+      const { data } = await this.synapCores._getHttpClient().get(
+        `/automl/models/${modelId}`,
+      );
 
-    const modelInfo: ModelInfo = {
-      id: data.id,
-      name: data.name,
-      task: data.task,
-      status: data.status,
-      accuracy: data.accuracy,
-      createdAt: new Date(data.created_at ?? Date.now()),
-      updatedAt: data.updated_at ? new Date(data.updated_at) : undefined,
-      config: data.config ?? {},
-    };
-
-    return new AutoMLModel(this, modelInfo);
+      // Unwrap { data: {...}, meta } envelope if present.
+      const m = data?.data ?? data;
+      const modelInfo: ModelInfo = {
+        id: m.id ?? modelId,
+        name: m.name ?? modelId,
+        task: m.task,
+        status: m.status,
+        accuracy: m.accuracy,
+        createdAt: new Date(m.created_at ?? Date.now()),
+        updatedAt: m.updated_at ? new Date(m.updated_at) : undefined,
+        config: m.config ?? {},
+      };
+      return new AutoMLModel(this, modelInfo);
+    } catch (err: any) {
+      // Treat NotFoundError as "model exists at the predict endpoint but is
+      // not listed" — return a stub. Re-raise anything else.
+      const status = err?.statusCode ?? err?.response?.status;
+      const code = err?.code;
+      if (status === 404 || code === 'NOT_FOUND') {
+        const modelInfo: ModelInfo = {
+          id: modelId,
+          name: modelId,
+          task: undefined as any,
+          status: 'unknown' as any,
+          accuracy: undefined,
+          createdAt: new Date(),
+          updatedAt: undefined,
+          config: {},
+        };
+        return new AutoMLModel(this, modelInfo);
+      }
+      throw err;
+    }
   }
 
   async listModels(filters?: {
@@ -132,8 +158,17 @@ export class AutoMLClient {
       params: filters,
     });
 
-    return (data.models ?? data ?? []).map((model: any) => ({
-      id: model.id,
+    // v0.3.0: gateway returns { data: [...], meta: ... }. Older shapes may use
+    // { models: [...] } or a bare array. Pick the first array we find.
+    const list: any[] = Array.isArray(data)
+      ? data
+      : (Array.isArray(data?.data) ? data.data
+        : (Array.isArray(data?.models) ? data.models
+          : (Array.isArray(data?.data?.items) ? data.data.items
+            : [])));
+
+    return list.map((model: any) => ({
+      id: model.id ?? model.name,
       name: model.name,
       task: model.task,
       status: model.status,

@@ -144,22 +144,40 @@ export class Collection {
   }
 
   async vectorSearch(options: VectorSearchOptions): Promise<SearchResult> {
+    // v0.3.0: gateway route is POST /v1/vectors/collections/:name/search and
+    // the field is `k`, not `top_k`. The earlier `/collections/:n/vector_search`
+    // endpoint was removed in v1.6.0.
     const { data } = await this.client._getHttpClient().post(
-      `${this.basePath}/vector_search`,
+      `/vectors/collections/${this.name}/search`,
       {
         vector: options.vector,
-        field: options.field || 'embedding',
-        top_k: options.topK || 10,
+        k: options.topK || 10,
         filter: options.filter,
-        distance_metric: options.distanceMetric || 'cosine',
-        include_metadata: options.includeMetadata,
+        include_metadata: options.includeMetadata !== false,
       },
     );
 
+    // Gateway shapes seen in the wild:
+    //   { data: [...], meta }                              (v1.6.5 bare array)
+    //   { data: { matches | results: [...] }, meta }
+    //   { matches | results: [...] }
+    //   { documents: [...] }
+    // Normalise to SearchResult { documents }.
+    const inner = data?.data ?? data;
+    const matches: any[] = Array.isArray(inner)
+      ? inner
+      : (inner?.matches
+        ?? inner?.results
+        ?? inner?.documents
+        ?? data?.matches
+        ?? data?.results
+        ?? data?.documents
+        ?? []);
+
     return {
-      documents: data.documents,
-      total: data.total,
-      tookMs: data.took_ms,
+      documents: matches,
+      total: (inner && !Array.isArray(inner) ? inner.total : undefined) ?? matches.length,
+      tookMs: (inner && !Array.isArray(inner) ? inner.took_ms : undefined) ?? data?.took_ms,
     };
   }
 
