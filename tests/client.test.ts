@@ -43,11 +43,14 @@ describe('SynapCores Client', () => {
 
   describe('initialization', () => {
     it('should initialize with correct config', () => {
+      // v0.4.0: API keys (ak_* / aidb_*) are now sent as
+      // `Authorization: Bearer <key>` instead of the old `X-API-Key`
+      // header. Matches gateway v1.6.5.2-ce which only honours Bearer.
       expect(mockCreate).toHaveBeenCalledWith(expect.objectContaining({
         baseURL: 'https://test.host:9090/v1',
         timeout: 30000,
         headers: expect.objectContaining({
-          'X-API-Key': 'ak_test_key',
+          'Authorization': 'Bearer ak_test_key',
           'Content-Type': 'application/json',
         }),
       }));

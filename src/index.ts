@@ -6,6 +6,19 @@
 
 export { SynapCores } from './client';
 export { Collection } from './collection';
+// v0.4.0: typed handle for the gateway's vector subsystem
+// (`/v1/vectors/collections/{name}`). Created via
+// `client.createVectorCollection(...)` or fetched via
+// `client.vectorCollection(name)`.
+export { VectorCollection } from './vector_collection';
+export type {
+  VectorRecord,
+  VectorHit,
+  VectorCollectionInfo,
+  VectorCollectionSearchOptions,
+  CreateVectorCollectionOptions,
+  VectorDistanceMetric,
+} from './vector_collection';
 export { AutoMLClient, AutoMLModel } from './automl';
 export { NLPClient } from './nlp';
 export { RecipeClient } from './recipes';
@@ -291,4 +304,4 @@ export {
 export { z } from 'zod';
 
 // Version
-export const VERSION = '0.3.0';
+export const VERSION = '0.4.0';

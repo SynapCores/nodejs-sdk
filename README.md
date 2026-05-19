@@ -2,6 +2,16 @@
 
 Official Node.js/TypeScript SDK for SynapCores AI-Native Database Management System - A SQL 2026-compliant database with native tenant isolation, AI/ML functions, and multimedia support.
 
+> **0.4.0 — vector-subsystem + auth alignment with gateway v1.6.5.2-ce.**
+> Closes three wire-format gaps the OpenClaw v0.1.0 integration hit:
+> (a) `apiKey: 'aidb_...'` now sends `Authorization: Bearer` instead of the
+> rejected `X-API-Key` header; (b) `client.createVectorCollection({name,
+> dimensions, distance_metric})` provisions on the **vector subsystem**
+> (not the document-store one); (c) the new
+> `client.vectorCollection(name).insert(...)` / `.search(...)` round-trip
+> hits `/v1/vectors/collections/{name}/...` end-to-end. See CHANGELOG.md.
+> Verified against gateway v1.6.5.2-ce. Validation: 11/12 PASS.
+
 > **0.2.0 — gateway v1.5.0-ce alignment.** This release rewires every
 > module against the v1.5.0-ce route surface: AutoML moved from `/ai/*`
 > to `/automl/*`, vector ops collapsed onto `/vector-algebra/operation`,

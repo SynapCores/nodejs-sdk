@@ -3,6 +3,53 @@
 All notable changes to `@synapcores/sdk` are documented here.
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.4.0 — 2026-05-18 — vector-subsystem + auth alignment with v1.6.5.2-ce gateway
+
+Closes three wire-format gaps surfaced during the OpenClaw v0.1.0 integration.
+Validation against `validate-nodejs-sdk-v04.ts` goes from **8/9** under 0.3.0
+to **11/12** under 0.4.0 (#5 — Cypher `$param` — remains the documented
+gateway-side blocker).
+
+### Fixed
+
+- **Auth: `apiKey` now sends `Authorization: Bearer <key>` instead of
+  `X-API-Key`.** Gateway v1.6.5.2-ce only honours the `Authorization`
+  header for both JWTs and AIDB-issued API keys (`aidb_*` / `ak_*`);
+  the legacy `X-API-Key` shim was rejected with HTTP 401
+  `missing_authorization`, forcing callers to manually promote API keys
+  into `jwtToken`. The SDK now sends `Bearer` for every credential
+  type — `apiKey: 'aidb_...'` Just Works.
+- **`Collection.vectorSearch` no longer crosses subsystems** (regression
+  guard for callers that relied on the 0.3.0 `client.collection(name)`
+  accessor with a vector collection: the search still hits the right
+  endpoint regardless of which accessor produced the handle).
+
+### Added
+
+- **`client.createVectorCollection({name, dimensions, distance_metric})`** —
+  posts to `POST /v1/vectors/collections` with the gateway's expected
+  body shape. The legacy `createCollection({name, vector_size, ...})`
+  silently dropped `vector_size` and posted to the document-store
+  subsystem, leaving the collection invisible to vector search.
+- **`client.vectorCollection(name)`** — synchronous typed handle for an
+  existing vector collection. Returns a `VectorCollection` wired to
+  `/v1/vectors/collections/{name}/...`, distinct from the document-store
+  `client.collection(name)` accessor.
+- **`VectorCollection` class** (`src/vector_collection.ts`) — explicit
+  vector-subsystem API surface: `insert(records)`, `search({vector, k,
+  filter?, includeMetadata?})`, `get(id)`, `delete(id|ids)`, `count()`,
+  `info()`. Wire paths target `/v1/vectors/collections/{name}/vectors`
+  and `/search`; envelope unwrapping matches the rest of the 0.3.0 SDK.
+- **`client.listVectorCollections()`** and
+  **`client.deleteVectorCollection(name)`** — sibling helpers for the
+  vector subsystem.
+- **`tests/live-smoke-v04.test.ts`** — gated on `AIDB_LIVE_TEST=1`,
+  runs the 12-test v0.4.0 validation suite against a live gateway.
+
+### Documentation
+
+- README now lists v1.6.5.2-ce as the verified-against gateway version.
+
 ## 0.3.0 — 2026-05-18
 
 Wire-alignment release for the v1.6.5.1-ce gateway. Brings the SDK back into sync

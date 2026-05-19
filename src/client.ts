@@ -4,6 +4,11 @@
 
 import axios, { AxiosInstance, AxiosError } from 'axios';
 import { Collection } from './collection';
+import {
+  VectorCollection,
+  CreateVectorCollectionOptions,
+  VectorCollectionInfo,
+} from './vector_collection';
 import { AutoMLClient } from './automl';
 import { NLPClient } from './nlp';
 import { RecipeClient } from './recipes';
@@ -125,13 +130,20 @@ export class SynapCores {
       ? new (require('https').Agent)({ rejectUnauthorized: false })
       : undefined;
 
-    // Determine authentication header
+    // Determine authentication header.
+    //
+    // v0.4.0: gateway v1.6.5.2-ce only honours `Authorization: Bearer <token>`
+    // for both JWTs and AIDB-issued API keys (`aidb_*` / `ak_*`). The earlier
+    // `X-API-Key` shim that 0.2.0/0.3.0 emitted was rejected with HTTP 401
+    // `missing_authorization`, forcing every caller to manually promote
+    // API keys into `jwtToken` (OpenClaw v0.1.0 shipped that workaround).
+    // Sending Bearer for every credential type makes the SDK match the
+    // gateway and lets `apiKey: 'aidb_...'` Just Work.
     const authHeader: Record<string, string> = {};
     if (this.config.jwtToken) {
       authHeader['Authorization'] = `Bearer ${this.config.jwtToken}`;
     } else if (this.config.apiKey) {
-      // Use X-API-Key header for API keys (not Bearer)
-      authHeader['X-API-Key'] = this.config.apiKey;
+      authHeader['Authorization'] = `Bearer ${this.config.apiKey}`;
     }
 
     this.httpClient = axios.create({
@@ -139,7 +151,7 @@ export class SynapCores {
       timeout: this.config.timeout,
       headers: {
         'Content-Type': 'application/json',
-        'User-Agent': 'synapcores-nodejs/0.3.0',
+        'User-Agent': 'synapcores-nodejs/0.4.0',
         ...authHeader,
       },
       ...(httpsAgent && { httpsAgent }),
@@ -413,6 +425,89 @@ export class SynapCores {
   async deleteCollection(name: string): Promise<void> {
     await this.httpClient.delete(`/collections/${name}`);
     this.collectionsCache.delete(name);
+  }
+
+  // =================================================================
+  // VECTOR COLLECTIONS — /v1/vectors/collections/{name}
+  //
+  // The gateway exposes two parallel "collection" worlds:
+  //  (a) document-store collections under /v1/collections (above), and
+  //  (b) vector collections under /v1/vectors/collections (below).
+  //
+  // v0.3.0 only wrapped (a) so vector-first users had to drop down to
+  // `_getHttpClient()` to call (b) directly. v0.4.0 adds first-class
+  // helpers — `createVectorCollection`, `vectorCollection(name)`,
+  // `listVectorCollections`, `deleteVectorCollection` — that target (b)
+  // and return a typed `VectorCollection` handle.
+  // =================================================================
+
+  private readonly vectorCollectionsCache = new Map<string, VectorCollection>();
+
+  /**
+   * Create a vector collection.
+   *
+   * Wire: `POST /v1/vectors/collections` with
+   * `{ name, dimensions, distance_metric }`. Distinct from
+   * `createCollection`, which targets the document-store subsystem.
+   *
+   * @example
+   *   const coll = await client.createVectorCollection({
+   *     name: 'memory_v1', dimensions: 1536, distance_metric: 'cosine',
+   *   });
+   *   await coll.insert({ id: 'v1', values: [...], metadata: { ... } });
+   */
+  async createVectorCollection(
+    options: CreateVectorCollectionOptions,
+  ): Promise<VectorCollection> {
+    await this.httpClient.post('/vectors/collections', {
+      name: options.name,
+      dimensions: options.dimensions,
+      distance_metric: options.distance_metric ?? 'cosine',
+    });
+    const coll = new VectorCollection(this, options.name);
+    this.vectorCollectionsCache.set(options.name, coll);
+    return coll;
+  }
+
+  /**
+   * Synchronous accessor for an existing vector collection. Does not
+   * round-trip to the gateway — use `createVectorCollection` if you
+   * need to provision the collection first, or `listVectorCollections`
+   * to confirm existence.
+   *
+   * v0.4.0 split: this targets the **vector subsystem**
+   * (`/v1/vectors/collections/{name}`). `client.collection(name)` still
+   * returns a document-store `Collection` for the legacy subsystem.
+   */
+  vectorCollection(name: string): VectorCollection {
+    const cached = this.vectorCollectionsCache.get(name);
+    if (cached) return cached;
+    const coll = new VectorCollection(this, name);
+    this.vectorCollectionsCache.set(name, coll);
+    return coll;
+  }
+
+  /**
+   * List vector collections.
+   *
+   * Wire: `GET /v1/vectors/collections`. Returns the bare array of
+   * collection-info objects (envelope unwrapped).
+   */
+  async listVectorCollections(): Promise<VectorCollectionInfo[]> {
+    const { data } = await this.httpClient.get('/vectors/collections');
+    const inner = data?.data ?? data;
+    if (Array.isArray(inner)) return inner as VectorCollectionInfo[];
+    return (inner?.items ?? inner?.collections ?? []) as VectorCollectionInfo[];
+  }
+
+  /**
+   * Delete a vector collection.
+   *
+   * Wire: `DELETE /v1/vectors/collections/{name}`.
+   */
+  async deleteVectorCollection(name: string): Promise<void> {
+    await this.httpClient.delete(`/vectors/collections/${encodeURIComponent(name)}`);
+    this.vectorCollectionsCache.delete(name);
   }
 
   /**
