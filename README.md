@@ -1,5 +1,8 @@
 # SynapCores Node.js/TypeScript SDK
 
+> **Questions or feedback?** Join the [SynapCores community discussions](https://github.com/SynapCores/synapcores-docs/discussions) — single hub for the engine, both SDKs, OpenClaw plugin, and demos.
+
+
 Official Node.js/TypeScript SDK for SynapCores AI-Native Database Management System - A SQL 2026-compliant database with native tenant isolation, AI/ML functions, and multimedia support.
 
 ## Features
