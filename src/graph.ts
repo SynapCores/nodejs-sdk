@@ -105,6 +105,11 @@ class GraphEdgeApi {
       properties: data.properties ?? props,
     };
   }
+
+  /** Delete an edge by id. Mirrors `graph.nodes.delete`. */
+  async delete(id: string): Promise<void> {
+    await this.synapCores._getHttpClient().delete(`/graph/edges/${id}`);
+  }
 }
 
 class GraphIndexesApi {
