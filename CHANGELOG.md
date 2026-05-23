@@ -3,6 +3,29 @@
 All notable changes to `@synapcores/sdk` are documented here.
 This project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.4.2 — 2026-05-22 — gateway envelope unwrap (fixes `executeQuery`, `sql`, prepared statements, embeddings)
+
+### Fixed
+
+- **`client.executeQuery()` / `client.sql()` / prepared statements now return
+  rows.** The gateway wraps every success payload in a uniform envelope —
+  `{ data: <payload>, meta: { request_id, timestamp } }` — but several methods
+  read fields off the *envelope* (`data.columns`, `data.rows`, …) instead of the
+  payload, so they came back `undefined`. This forced consumers to drop down to
+  raw HTTP. The response is now unwrapped **once, centrally, in the Axios
+  response interceptor**, so every method and sub-client receives the bare
+  payload. Methods that already hand-unwrapped (`listCollectionsDetailed`,
+  `automl`, vector collections) keep working — their defensive `data?.data ?? data`
+  reads are now no-ops. Non-enveloped/streaming responses pass through untouched.
+- **`automl.listModels()`** updated to read the unwrapped array shape
+  (`data` / `data.items`) with the older nested shapes kept as fallbacks.
+
+### Why this matters
+
+Parameterized queries (`$1` placeholders) are bound **server-side** as of
+gateway v1.6.6.6-ce; with this SDK release, `client.executeQuery({ sql, parameters })`
+is the correct, injection-safe, end-to-end path — no raw-axios workaround needed.
+
 ## 0.4.0 — 2026-05-18 — vector-subsystem + auth alignment with v1.6.5.2-ce gateway
 
 Closes three wire-format gaps surfaced during the OpenClaw v0.1.0 integration.

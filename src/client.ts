@@ -151,15 +151,35 @@ export class SynapCores {
       timeout: this.config.timeout,
       headers: {
         'Content-Type': 'application/json',
-        'User-Agent': 'synapcores-nodejs/0.4.0',
+        'User-Agent': 'synapcores-nodejs/0.4.2',
         ...authHeader,
       },
       ...(httpsAgent && { httpsAgent }),
     });
 
-    // Add response interceptor for error handling
+    // Response interceptor: unwrap the standard gateway envelope + error handling.
+    //
+    // The gateway wraps EVERY success payload in a uniform envelope:
+    //   { data: <payload>, meta: { request_id, timestamp } }
+    // Unwrapping it once here means every method (and sub-client) receives the
+    // bare payload and never has to special-case the envelope — which is what
+    // previously caused executeQuery/prepare/embeddings to read `data.columns`
+    // off the envelope and get `undefined`. Anything that isn't the envelope
+    // (streams, already-bare payloads, future shapes) passes through untouched.
     this.httpClient.interceptors.response.use(
-      (response) => response,
+      (response) => {
+        const body = response.data;
+        const isEnvelope =
+          body &&
+          typeof body === 'object' &&
+          !Array.isArray(body) &&
+          'data' in body &&
+          ('meta' in body || Object.keys(body).length === 1);
+        if (isEnvelope) {
+          response.data = (body as Record<string, unknown>).data;
+        }
+        return response;
+      },
       (error) => this.handleError(error),
     );
 

@@ -158,14 +158,16 @@ export class AutoMLClient {
       params: filters,
     });
 
-    // v0.3.0: gateway returns { data: [...], meta: ... }. Older shapes may use
-    // { models: [...] } or a bare array. Pick the first array we find.
+    // The response interceptor already unwraps the { data, meta } envelope, so
+    // the array arrives as `data` (bare) or `data.items`. The remaining branches
+    // are belt-and-suspenders for older/non-enveloped shapes.
     const list: any[] = Array.isArray(data)
       ? data
-      : (Array.isArray(data?.data) ? data.data
+      : (Array.isArray(data?.items) ? data.items
         : (Array.isArray(data?.models) ? data.models
-          : (Array.isArray(data?.data?.items) ? data.data.items
-            : [])));
+          : (Array.isArray(data?.data) ? data.data
+            : (Array.isArray(data?.data?.items) ? data.data.items
+              : []))));
 
     return list.map((model: any) => ({
       id: model.id ?? model.name,
