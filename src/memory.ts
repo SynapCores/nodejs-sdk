@@ -90,10 +90,10 @@ export class MemoryClient {
     let sql: string;
     let parameters: unknown[];
     if (options?.metadata !== undefined) {
-      sql = 'SELECT MEMORY_STORE(?, ?, ?) AS id';
+      sql = 'SELECT MEMORY_STORE($1, $2, $3) AS id';
       parameters = [namespace, content, JSON.stringify(options.metadata)];
     } else {
-      sql = 'SELECT MEMORY_STORE(?, ?) AS id';
+      sql = 'SELECT MEMORY_STORE($1, $2) AS id';
       parameters = [namespace, content];
     }
 
@@ -150,7 +150,7 @@ export class MemoryClient {
 
     const sql =
       'SELECT id, content, similarity, metadata, created_at ' +
-      'FROM MEMORY_RECALL(?, ?, ?)';
+      'FROM MEMORY_RECALL($1, $2, $3)';
     const parameters: unknown[] = [namespace, query, topK];
 
     let result: QueryResult;
@@ -183,7 +183,7 @@ export class MemoryClient {
       );
     }
 
-    const sql = 'SELECT MEMORY_FORGET(?, ?) AS deleted';
+    const sql = 'SELECT MEMORY_FORGET($1, $2) AS deleted';
     const parameters: unknown[] = [namespace, id];
 
     let result: QueryResult;

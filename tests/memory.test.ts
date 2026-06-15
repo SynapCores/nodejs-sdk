@@ -122,7 +122,7 @@ describe('MemoryClient (unit, mocked transport)', () => {
       expect(httpClient.post).toHaveBeenCalledWith(
         '/query/execute',
         expect.objectContaining({
-          sql: 'SELECT MEMORY_STORE(?, ?) AS id',
+          sql: 'SELECT MEMORY_STORE($1, $2) AS id',
           parameters: ['default', 'I prefer Python'],
         }),
       );
@@ -147,7 +147,7 @@ describe('MemoryClient (unit, mocked transport)', () => {
       expect(httpClient.post).toHaveBeenCalledWith(
         '/query/execute',
         expect.objectContaining({
-          sql: 'SELECT MEMORY_STORE(?, ?, ?) AS id',
+          sql: 'SELECT MEMORY_STORE($1, $2, $3) AS id',
           parameters: [
             'default',
             'Customer renewed annual plan',
@@ -178,7 +178,7 @@ describe('MemoryClient (unit, mocked transport)', () => {
         expect.objectContaining({
           sql:
             'SELECT id, content, similarity, metadata, created_at ' +
-            'FROM MEMORY_RECALL(?, ?, ?)',
+            'FROM MEMORY_RECALL($1, $2, $3)',
           parameters: ['default', 'what language do I like', 10],
         }),
       );
@@ -320,7 +320,7 @@ describe('MemoryClient (unit, mocked transport)', () => {
       expect(httpClient.post).toHaveBeenCalledWith(
         '/query/execute',
         expect.objectContaining({
-          sql: 'SELECT MEMORY_FORGET(?, ?) AS deleted',
+          sql: 'SELECT MEMORY_FORGET($1, $2) AS deleted',
           parameters: ['default', 'mem_a_1'],
         }),
       );
