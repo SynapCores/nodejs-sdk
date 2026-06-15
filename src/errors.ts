@@ -134,6 +134,24 @@ export class TransactionError extends SynapCoresError {
   }
 }
 
+export class MemoryError extends SynapCoresError {
+  public readonly namespace?: string;
+  public readonly operation?: string;
+
+  constructor(
+    message: string,
+    code: string = 'MEMORY_ERROR',
+    namespace?: string,
+    operation?: string,
+    details?: Record<string, any>,
+  ) {
+    super(message, code, details);
+    this.name = 'MemoryError';
+    this.namespace = namespace;
+    this.operation = operation;
+  }
+}
+
 export class BatchOperationError extends SynapCoresError {
   public readonly failedItems?: Array<{
     index: number;

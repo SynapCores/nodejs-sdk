@@ -13,6 +13,12 @@ export { SchemaClient } from './schema';
 export { ImportExportClient } from './import';
 export { IntegrationClient } from './integrations';
 export { BackupClient } from './backup';
+export { MemoryClient } from './memory';
+export type {
+  MemoryRecord,
+  MemoryStoreOptions,
+  MemoryRecallOptions,
+} from './memory';
 export { Subscription } from './subscription';
 
 // Export types
@@ -210,10 +216,11 @@ export {
   VectorError,
   TransactionError,
   BatchOperationError,
+  MemoryError,
 } from './errors';
 
 // Export utilities
 export { z } from 'zod';
 
 // Version
-export const VERSION = '0.1.0';
+export const VERSION = '0.5.0';

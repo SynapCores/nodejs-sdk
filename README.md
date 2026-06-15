@@ -700,6 +700,42 @@ console.log(`Sentiment: ${analysis.sentiment.label}`);
 console.log(`Entities:`, analysis.entities);
 ```
 
+### Agent Memory
+
+The memory client wraps the engine-side `MEMORY_STORE`, `MEMORY_RECALL`,
+and `MEMORY_FORGET` SQL functions — namespaced semantic memory for AI
+agents. The backing table is auto-created on first write; content is
+embedded via the configured embedding model.
+
+```typescript
+// Store text in a namespace
+const id = await client.memory.store('default', 'User prefers Python');
+
+// Store with structured metadata
+await client.memory.store(
+  'default',
+  'Customer renewed annual plan',
+  { metadata: { importance: 0.9, source: 'crm' } },
+);
+
+// Semantic retrieval — returns the top-K nearest memories
+const hits = await client.memory.recall(
+  'default',
+  'preferred programming language',
+  { topK: 3 },
+);
+for (const hit of hits) {
+  console.log(hit.similarity.toFixed(2), hit.content, hit.metadata);
+}
+
+// Forget a memory by id
+const deleted = await client.memory.forget('default', id);
+```
+
+Namespaces must match `/^[A-Za-z_][A-Za-z0-9_]*$/`. Invalid namespaces
+throw a `MemoryError` client-side without hitting the engine. Recalling
+from an unwritten namespace returns `[]` rather than raising.
+
 ### Real-time Subscriptions
 
 ```typescript

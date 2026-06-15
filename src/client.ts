@@ -11,6 +11,7 @@ import { SchemaClient } from './schema';
 import { ImportExportClient } from './import';
 import { IntegrationClient } from './integrations';
 import { BackupClient } from './backup';
+import { MemoryClient } from './memory';
 import {
   SynapCoresConfig,
   QueryResult,
@@ -80,6 +81,7 @@ export class SynapCores {
   public readonly import: ImportExportClient;
   public readonly integrations: IntegrationClient;
   public readonly backup: BackupClient;
+  public readonly memory: MemoryClient;
 
   constructor(config: SynapCoresConfig = {}) {
     this.config = {
@@ -123,7 +125,7 @@ export class SynapCores {
       timeout: this.config.timeout,
       headers: {
         'Content-Type': 'application/json',
-        'User-Agent': 'synapcores-nodejs/0.1.0',
+        'User-Agent': 'synapcores-nodejs/0.5.0',
         ...authHeader,
       },
       ...(httpsAgent && { httpsAgent }),
@@ -143,6 +145,7 @@ export class SynapCores {
     this.import = new ImportExportClient(this);
     this.integrations = new IntegrationClient(this);
     this.backup = new BackupClient(this);
+    this.memory = new MemoryClient(this);
   }
 
   private handleError(error: AxiosError): never {
