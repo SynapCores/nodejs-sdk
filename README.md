@@ -8,10 +8,10 @@ Official Node.js/TypeScript SDK for SynapCores AI-Native Database Management Sys
 ## Features
 
 - 🚀 **Full TypeScript Support**: Complete type definitions for excellent IDE experience
-- 🔐 **Dual Authentication**: Support for both JWT tokens and API keys
-- 👤 **User Management**: Registration, login, and token refresh
+- 🔐 **Dual Authentication**: Both JWT tokens and API keys, sent as `Authorization: Bearer <token>`
+- 👤 **User Management**: Registration and login
 - 🔑 **API Key Management**: Create, list, monitor, and revoke API keys
-- 🤖 **AI-Native Operations**: Built-in embeddings, vector search, and semantic analysis
+- 🤖 **AI-Native Operations**: Built-in embeddings plus SQL vector functions (`COSINE_SIMILARITY`, `L2_DISTANCE`, …) and NLP
 - 📊 **SQL 2026 Compliance**: Enhanced SQL syntax with AI operations
 - 📁 **Multimedia Support**: Upload and manage images, videos, audio, and documents
 - 🔄 **Real-time Subscriptions**: WebSocket support for live data updates
@@ -102,7 +102,7 @@ API keys are suitable for server-to-server integrations and programmatic access.
 const client = new SynapCores({
   host: 'localhost',
   port: 8080,
-  apiKey: 'ak_prod_xyz789abc123...', // Use X-API-Key header
+  apiKey: 'ak_prod_xyz789abc123...', // Sent as `Authorization: Bearer <key>`
 });
 ```
 
@@ -132,11 +132,13 @@ const { access_token } = await client.login({
 client.setJWTToken(access_token);
 ```
 
-**Refresh Token:**
+**Renewing a token:** There is no token-refresh endpoint. `client.refreshToken()`
+was removed in 0.6.0 and throws `NotImplementedError` — the gateway v2 API has no
+`/auth/refresh` route. Re-authenticate with `login()` to obtain a fresh token:
+
 ```typescript
-// Refresh before expiration
-const refreshResponse = await client.refreshToken();
-console.log('New token expires in:', refreshResponse.expires_in, 'seconds');
+// Re-authenticate when the access token nears expiration
+const { access_token } = await client.login({ username, password });
 ```
 
 **Logout:**
@@ -202,7 +204,9 @@ keys.forEach(key => {
 ### Get API Key Statistics
 
 ```typescript
-const stats = await client.getAPIKeyStats('key_xyz789');
+// Aggregate stats across all keys (gateway v2 has no per-key stats route,
+// so any argument passed here is ignored).
+const stats = await client.getAPIKeyStats();
 
 console.log(`Total requests: ${stats.total_requests}`);
 console.log(`Last 24h: ${stats.requests_last_24h}`);
@@ -339,15 +343,20 @@ const searchResult = await client.executeQuery({
 });
 ```
 
-**Available AI Functions:**
+**Available SQL AI/vector functions** (engine-side; invoke them through `executeQuery`):
 - `EMBED(text, model)` - Generate embedding vector
-- `COSINE_SIMILARITY(vec1, vec2)` - Cosine similarity
 - `EXTRACT_TEXT(multimedia_id)` - Extract text from images/PDFs
-- `EXTRACT_FRAMES(multimedia_id, count)` - Extract video frames
-- `DURATION(multimedia_id)` - Get media duration
-- `VECTOR_ADD(vec1, vec2)` - Vector addition
-- `VECTOR_DOT(vec1, vec2)` - Dot product
+- `COSINE_SIMILARITY(vec1, vec2)` - Cosine similarity
+- `L2_DISTANCE(vec1, vec2)` - Euclidean distance
+- `INNER_PRODUCT(vec1, vec2)` - Dot product
+- `VECTOR_ADD(vec1, vec2)` / `VECTOR_SUBTRACT(vec1, vec2)` - Vector arithmetic
+- `VECTOR_SCALAR_MULTIPLY(vec, scalar)` - Scale a vector
 - `VECTOR_NORMALIZE(vec)` - Normalize vector
+- `VECTOR_MAGNITUDE(vec)` - Vector length
+
+> **Note (0.6.0):** vector math is only available as these SQL functions. The
+> former client-side helpers (`client.cosineSimilarity`, `client.vectorAdd`, …)
+> were removed and now throw `NotImplementedError` — see [Vector Operations](#vector-operations) below.
 
 ### Legacy SQL Method
 
@@ -596,75 +605,100 @@ await client.deleteMultimedia(
 
 ### Vector Operations
 
+`embed()` is the one client-side vector helper that remains. All vector *math*
+moved to SQL functions in 0.6.0.
+
 ```typescript
-// Generate embeddings
+// Generate an embedding (single input → number[])
 const embedding = await client.embed('High-quality mechanical keyboard');
-// or batch
+
+// Batch input → number[][] (the client embeds each string in turn)
 const embeddings = await client.embed([
   'Laptop computer',
   'Wireless mouse',
   'Mechanical keyboard',
 ]);
+```
 
-// Vector similarity
-const similarity = await client.cosineSimilarity(
-  embedding1,
-  embedding2
-);
+> **Removed in 0.6.0:** `cosineSimilarity`, `vectorAdd`, `vectorSubtract`,
+> `vectorScalarMultiply`, `vectorDotProduct`, `l2Distance`, `innerProduct`,
+> `normalizeVector`, `vectorMagnitude` — these throw `NotImplementedError`.
+> Use the SQL vector functions instead:
 
-// Vector arithmetic
-const sum = await client.vectorAdd(vec1, vec2);
-const normalized = await client.normalizeVector(vec);
+```typescript
+// Cosine similarity between two vectors
+const sim = await client.executeQuery({
+  sql: 'SELECT COSINE_SIMILARITY($1, $2) AS score',
+  parameters: [embedding1, embedding2],
+});
+console.log('similarity:', sim.rows[0][0]);
+
+// Vector arithmetic / normalization
+const result = await client.executeQuery({
+  sql: 'SELECT VECTOR_NORMALIZE(VECTOR_ADD($1, $2)) AS v',
+  parameters: [vec1, vec2],
+});
 ```
 
 ### Vector Search
 
+> **Removed in 0.6.0:** `client.knnSearch`, `client.rangeSearch` and
+> `client.hybridSearch` throw `NotImplementedError` — the gateway v2 API has no
+> standalone vector-search routes. Express nearest-neighbor search as an
+> `ORDER BY <distance>` SQL query instead:
+
 ```typescript
-// K-nearest neighbors search
-const knnResults = await client.knnSearch({
-  queryVector: embedding,
-  k: 10,
-  tableName: 'products',
-  vectorColumn: 'embedding',
-  metadataColumns: ['name', 'price'],
-  filter: { category: 'electronics' },
+// K-nearest neighbors: order by distance and LIMIT
+const knnResults = await client.executeQuery({
+  sql: `
+    SELECT id, name, price
+    FROM products
+    WHERE category = $2
+    ORDER BY L2_DISTANCE(embedding, $1) ASC
+    LIMIT 10
+  `,
+  parameters: [embedding, 'electronics'],
 });
 
-// Range search
-const rangeResults = await client.rangeSearch({
-  queryVector: embedding,
-  threshold: 0.8,
-  tableName: 'products',
-  vectorColumn: 'embedding',
-  maxResults: 100,
+// Range search: filter by a similarity threshold
+const rangeResults = await client.executeQuery({
+  sql: `
+    SELECT id, name, COSINE_SIMILARITY(embedding, $1) AS score
+    FROM products
+    WHERE COSINE_SIMILARITY(embedding, $1) >= $2
+    ORDER BY score DESC
+  `,
+  parameters: [embedding, 0.8],
 });
 ```
 
 ### Collection Operations
 
+`getCollection()`, `insert()`, `get()`, `update()` and `delete()` are the
+working collection methods. Document search/query/count/stats on the
+`Collection` object were removed in 0.6.0 (they throw `NotImplementedError`) —
+use `executeQuery` against the collection instead.
+
 ```typescript
 // Get collection reference
 const products = await client.getCollection('products');
 
-// Insert documents
+// Insert a document (returns { ids, inserted })
 await products.insert({
   name: 'Laptop',
   price: 1299.99,
   category: 'Electronics',
 });
 
-// Search
-const results = await products.search({
-  filter: { category: 'Electronics' },
-  topK: 10,
-  offset: 0,
-});
+// Fetch, update and delete by document id
+const doc = await products.get('prod_123');
+await products.update('prod_123', { price: 1199.99 });
+await products.delete('prod_123');
 
-// Vector search
-const vectorResults = await products.vectorSearch({
-  vector: embedding,
-  topK: 5,
-  filter: { price: { $lt: 500 } },
+// Query documents with SQL (replaces the removed products.search / .vectorSearch)
+const results = await client.executeQuery({
+  sql: 'SELECT * FROM products WHERE category = $1 ORDER BY price ASC LIMIT 10',
+  parameters: ['Electronics'],
 });
 ```
 
@@ -689,15 +723,82 @@ const predictions = await model.predict({
 
 ### NLP Analysis
 
+> **Removed in 0.6.0:** the combined `client.nlp.analyze(...)` call throws
+> `NotImplementedError` — the gateway v2 AI surface has no combined endpoint.
+> Call the per-task methods, each of which maps to a real route and takes a
+> single `text`:
+
 ```typescript
-// Analyze text
-const analysis = await client.nlp.analyze({
-  text: 'This product exceeded my expectations. Highly recommend!',
-  tasks: ['sentiment', 'entities', 'summary'],
+const text = 'This product exceeded my expectations. Highly recommend!';
+
+// Sentiment → { label, score, confidence }
+const sentiment = await client.nlp.sentiment(text);
+console.log('Sentiment:', sentiment.label);
+
+// Named entities → [{ text, type, start, end, score }]
+const entities = await client.nlp.extractEntities(text);
+console.log('Entities:', entities);
+
+// Summarization → string
+const summary = await client.nlp.summarize({ text, maxLength: 60 });
+
+// Zero-shot classification → { category: score }
+const scores = await client.nlp.classify({
+  text,
+  categories: ['praise', 'complaint', 'question'],
+});
+```
+
+### Recipes
+
+Manage and run reusable SQL/AI recipes via `client.recipes.*`.
+
+```typescript
+// Create a recipe
+const recipe = await client.recipes.create({
+  name: 'Top customers',
+  description: 'Revenue leaders this quarter',
+  category: 'analytics',
+  content: 'SELECT customer_id, SUM(amount) AS total FROM orders GROUP BY customer_id ORDER BY total DESC LIMIT 10',
+  tags: ['sales'],
 });
 
-console.log(`Sentiment: ${analysis.sentiment.label}`);
-console.log(`Entities:`, analysis.entities);
+// List, get, execute
+const recipes = await client.recipes.list({ category: 'analytics' });
+const one = await client.recipes.get(recipe.id);
+const run = await client.recipes.execute({ recipe: recipe.id, parameters: {} });
+console.log('rows:', run.results, 'ok:', run.success);
+
+// AI-generate a recipe from intent, and list categories
+const generated = await client.recipes.generate({ intent: 'monthly churn by plan' });
+const categories = await client.recipes.listCategories();
+```
+
+### Prepared Statements
+
+Prepare once, execute many times (mapped to `/query/{prepare,exec,close}`).
+
+```typescript
+const stmt = await client.prepareStatement(
+  'SELECT * FROM products WHERE category = $1',
+  { name: 'by_category' },
+);
+
+const result = await client.executePrepared('by_category', ['electronics']);
+
+await client.deallocatePrepared('by_category');
+```
+
+### Schema Introspection
+
+```typescript
+// List tables and describe one (GET /schema/tables[/:name])
+const tables = await client.schema.listTables();
+const schema = await client.schema.getTable('products');
+console.log(schema.columns, schema.indexes);
+
+// Shorthand on the main client
+const info = await client.describeTable('products');
 ```
 
 ### Agent Memory
@@ -762,6 +863,7 @@ import {
   AuthenticationError,
   ValidationError,
   NotFoundError,
+  NotImplementedError,
   ServerError,
   RateLimitError,
   SQLError,
@@ -776,8 +878,11 @@ try {
 } catch (error) {
   if (error instanceof AuthenticationError) {
     console.error('Authentication failed:', error.message);
-    // Try refreshing token or re-login
-    await client.refreshToken();
+    // Token expired — re-authenticate (there is no refresh endpoint)
+    await client.login({ username, password });
+  } else if (error instanceof NotImplementedError) {
+    // Method removed in 0.6.0 — the message names the supported alternative
+    console.error('Not available on gateway v2:', error.message);
   } else if (error instanceof ValidationError) {
     console.error('Validation error:', error.message);
     console.error('Details:', error.details);
@@ -820,8 +925,8 @@ try {
 const client = new SynapCores({
   host: 'localhost',              // Server host (default: 'localhost')
   port: 8080,                     // Server port (default: 8080)
-  apiKey: 'ak_prod_...',         // API key (optional, use with X-API-Key header)
-  jwtToken: 'eyJhbGc...',        // JWT token (optional, use with Bearer header)
+  apiKey: 'ak_prod_...',         // API key (optional; sent as `Authorization: Bearer`)
+  jwtToken: 'eyJhbGc...',        // JWT token (optional; sent as `Authorization: Bearer`)
   useHttps: false,               // Use HTTPS (default: false)
   timeout: 30000,                // Request timeout in ms (default: 30000)
   maxRetries: 3,                  // Max retry attempts (default: 3)
@@ -1037,6 +1142,30 @@ const collections = await client.listCollections(); // Returns string[]
 // NEW
 const result = await client.listCollectionsDetailed(); // Returns detailed info
 ```
+
+### 0.6.0 Route Reconciliation
+
+0.6.0 reconciled every SDK method against the gateway v2 API. Methods whose
+route was removed now throw a typed `NotImplementedError` (code
+`NOT_IMPLEMENTED`) whose message names the supported alternative — no method
+silently 404s. If you were on 0.5.x or earlier, update these calls:
+
+| Removed method | Use instead |
+| --- | --- |
+| `client.cosineSimilarity`, `vectorAdd`, `vectorSubtract`, `vectorScalarMultiply`, `vectorDotProduct`, `l2Distance`, `innerProduct`, `normalizeVector`, `vectorMagnitude` | SQL functions via `executeQuery` (`SELECT COSINE_SIMILARITY($1,$2)`, `VECTOR_ADD`, …) |
+| `client.knnSearch`, `rangeSearch`, `hybridSearch` | `executeQuery` with `ORDER BY L2_DISTANCE(...)` / `WHERE COSINE_SIMILARITY(...) >= $n` |
+| `client.batchInsert`, `batchUpdate`, `batchDelete` | `client.executeBatchQueries({ queries: [...] })` |
+| `client.refreshToken` | `client.login({ username, password })` |
+| `client.nlp.analyze` | `client.nlp.sentiment` / `extractEntities` / `summarize` / `classify` |
+| `collection.search`, `vectorSearch`, `query`, `count`, `stats`, `createIndex`, `dropIndex` | `client.executeQuery(...)` against the collection |
+| `client.schema.getRelationships`, `getStatistics`, `validateSchema`, `compareSchemas`, `generateDDL`, `analyzeTable` | `client.schema.getTable(name)` / `listTables()` / DDL via `executeQuery` |
+| `client.automl.getTrainingMetrics` | `client.automl.getTrainingJob(id)` / `getModel(id)` |
+
+Methods that were **re-routed** (same call, corrected path/shape) continue to
+work unchanged from the caller's side: `automl.*`, `backup.*`, prepared
+statements (`prepareStatement`/`executePrepared`/`deallocatePrepared`),
+`import`, `schema.getTable`/`listTables`, `integrations.*`, and
+`getAPIKeyStats` (now aggregate — the `keyId` argument is ignored).
 
 ## Documentation
 
