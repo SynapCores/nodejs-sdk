@@ -3,6 +3,7 @@
  */
 
 import { SynapCores } from './client';
+import { NotImplementedError } from './errors';
 import {
   ModelInfo,
   TrainOptions,
@@ -33,10 +34,11 @@ export class AutoMLModel {
     const isSingle = !Array.isArray(data);
     const inputs = isSingle ? [data] : data;
 
+    // Gateway (v2): POST /automl/models/:id/predict — model id is in the
+    // path; body is `{ inputs: [ {col: val}, ... ] }`.
     const response = await this.client.synapCores._getHttpClient().post(
-      '/ai/predict',
+      `/automl/models/${this.id}/predict`,
       {
-        model_id: this.id,
         inputs,
       },
     );
@@ -49,9 +51,7 @@ export class AutoMLModel {
     testData: string | Record<string, any>[],
     target?: string,
   ): Promise<EvaluationResult> {
-    const payload: any = {
-      model_id: this.id,
-    };
+    const payload: any = {};
 
     if (typeof testData === 'string') {
       payload.collection = testData;
@@ -62,8 +62,9 @@ export class AutoMLModel {
       }
     }
 
+    // Gateway (v2): POST /automl/models/:id/evaluate.
     const { data } = await this.client.synapCores._getHttpClient().post(
-      '/ai/evaluate',
+      `/automl/models/${this.id}/evaluate`,
       payload,
     );
 
@@ -71,8 +72,9 @@ export class AutoMLModel {
   }
 
   async delete(): Promise<void> {
+    // Gateway (v2): DELETE /automl/models/:id.
     await this.client.synapCores._getHttpClient().delete(
-      `/ai/models/${this.id}`,
+      `/automl/models/${this.id}`,
     );
   }
 }
@@ -81,7 +83,8 @@ export class AutoMLClient {
   constructor(public readonly synapCores: SynapCores) {}
 
   async train(options: TrainOptions): Promise<AutoMLModel> {
-    const { data } = await this.synapCores._getHttpClient().post('/ai/train', {
+    // Gateway (v2): POST /automl/train.
+    const { data } = await this.synapCores._getHttpClient().post('/automl/train', {
       collection: options.collection,
       target: options.target,
       features: options.features,
@@ -108,8 +111,9 @@ export class AutoMLClient {
   }
 
   async getModel(modelId: string): Promise<AutoMLModel> {
+    // Gateway (v2): GET /automl/models/:id.
     const { data } = await this.synapCores._getHttpClient().get(
-      `/ai/models/${modelId}`,
+      `/automl/models/${modelId}`,
     );
 
     const modelInfo: ModelInfo = {
@@ -130,11 +134,13 @@ export class AutoMLClient {
     task?: string;
     status?: string;
   }): Promise<ModelInfo[]> {
-    const { data } = await this.synapCores._getHttpClient().get('/ai/models', {
+    // Gateway (v2): GET /automl/models.
+    const { data } = await this.synapCores._getHttpClient().get('/automl/models', {
       params: filters,
     });
 
-    return data.models.map((model: any) => ({
+    // Gateway (v2) returns a bare array; tolerate `{ models: [...] }` too.
+    return (data.models || data || []).map((model: any) => ({
       id: model.id,
       name: model.name,
       task: model.task,
@@ -150,7 +156,9 @@ export class AutoMLClient {
    * Start async training job
    */
   async trainAsync(options: AsyncTrainOptions): Promise<TrainingJob> {
-    const { data } = await this.synapCores._getHttpClient().post('/ai/train/async', {
+    // Gateway (v2): POST /automl/train with `async_mode: true` — the same
+    // training endpoint returns a job handle instead of blocking.
+    const { data } = await this.synapCores._getHttpClient().post('/automl/train', {
       collection: options.collection,
       target: options.target,
       features: options.features,
@@ -160,6 +168,7 @@ export class AutoMLClient {
       validation_split: options.validationSplit || 0.2,
       max_trials: options.maxTrials || 10,
       timeout_minutes: options.timeoutMinutes || 60,
+      async_mode: true,
       callback_url: options.callback_url,
       webhook_url: options.webhook_url,
     });
@@ -186,8 +195,9 @@ export class AutoMLClient {
    * Get training job status
    */
   async getTrainingJob(jobId: string): Promise<TrainingJob> {
+    // Gateway (v2): GET /automl/jobs/:id.
     const { data } = await this.synapCores._getHttpClient().get(
-      `/ai/train/jobs/${jobId}`
+      `/automl/jobs/${jobId}`
     );
 
     return {
@@ -219,8 +229,9 @@ export class AutoMLClient {
     if (options.page) params.append('page', options.page.toString());
     if (options.page_size) params.append('page_size', options.page_size.toString());
 
+    // Gateway (v2): GET /automl/jobs.
     const { data } = await this.synapCores._getHttpClient().get(
-      `/ai/train/jobs?${params.toString()}`
+      `/automl/jobs?${params.toString()}`
     );
 
     return (data.jobs || data).map((job: any) => ({
@@ -245,24 +256,25 @@ export class AutoMLClient {
    * Cancel a training job
    */
   async cancelTrainingJob(jobId: string): Promise<void> {
-    await this.synapCores._getHttpClient().post(`/ai/train/jobs/${jobId}/cancel`);
+    // Gateway (v2): POST /automl/jobs/:id/stop.
+    await this.synapCores._getHttpClient().post(`/automl/jobs/${jobId}/stop`);
   }
 
   /**
-   * Get training metrics for a job
+   * Get training metrics for a job.
+   *
+   * @deprecated The gateway v2 AutoML surface does not expose a per-job
+   * metrics timeline. Read the final metrics from the completed job via
+   * {@link getTrainingJob} (`job.best_accuracy`) or from the trained model
+   * via {@link getModel} instead.
    */
-  async getTrainingMetrics(jobId: string): Promise<TrainingMetrics[]> {
-    const { data } = await this.synapCores._getHttpClient().get(
-      `/ai/train/jobs/${jobId}/metrics`
+  async getTrainingMetrics(_jobId: string): Promise<TrainingMetrics[]> {
+    throw new NotImplementedError(
+      'client.automl.getTrainingMetrics is removed — the gateway v2 AutoML ' +
+        'surface has no per-job metrics timeline. Use ' +
+        'client.automl.getTrainingJob(jobId) for the final accuracy, or ' +
+        'client.automl.getModel(modelId) for the trained model metrics.',
     );
-
-    return (data.metrics || data).map((metric: any) => ({
-      trial: metric.trial,
-      accuracy: metric.accuracy,
-      loss: metric.loss,
-      metrics: metric.metrics,
-      timestamp: new Date(metric.timestamp),
-    }));
   }
 
   /**

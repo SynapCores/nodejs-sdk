@@ -3,6 +3,7 @@
  */
 
 import { SynapCores } from './client';
+import { NotImplementedError } from './errors';
 import {
   TableInfo,
   TableSchema,
@@ -111,94 +112,93 @@ export class SchemaClient {
   }
 
   /**
-   * Get all relationships in the database
+   * Get all relationships in the database.
+   *
+   * @deprecated The gateway v2 schema surface exposes relationships only
+   * per-table, inside {@link getTable} (`schema.relationships`). There is no
+   * database-wide `/schema/relationships` route. Iterate {@link listTables}
+   * and read each table's relationships instead.
    */
   async getRelationships(): Promise<RelationshipInfo[]> {
-    const { data } = await this.synapCores._getHttpClient().get('/schema/relationships');
-
-    return (data.relationships || data).map((rel: any) => ({
-      type: rel.type,
-      from_table: rel.from_table || rel.source_table,
-      from_column: rel.from_column || rel.source_column,
-      to_table: rel.to_table || rel.target_table,
-      to_column: rel.to_column || rel.target_column,
-      name: rel.name,
-    }));
+    throw new NotImplementedError(
+      'client.schema.getRelationships is removed — the gateway v2 schema ' +
+        'surface has no database-wide relationships route. Read per-table ' +
+        'relationships from client.schema.getTable(name).relationships.',
+    );
   }
 
   /**
-   * Get schema statistics
+   * Get schema statistics.
+   *
+   * @deprecated No `/schema/statistics` route exists in gateway v2. Derive
+   * counts from {@link listTables}, or query the engine directly via
+   * `client.executeQuery('SHOW TABLES')`.
    */
   async getStatistics(): Promise<SchemaStatistics> {
-    const { data } = await this.synapCores._getHttpClient().get('/schema/statistics');
-
-    return {
-      table_count: data.table_count || 0,
-      view_count: data.view_count || 0,
-      index_count: data.index_count || 0,
-      relationship_count: data.relationship_count || 0,
-      total_size_bytes: data.total_size_bytes || 0,
-      total_rows: data.total_rows || 0,
-      version: data.version,
-      analyzed_at: data.analyzed_at ? new Date(data.analyzed_at) : undefined,
-    };
+    throw new NotImplementedError(
+      'client.schema.getStatistics is removed — no /schema/statistics route ' +
+        'exists in gateway v2. Derive counts from client.schema.listTables() ' +
+        "or client.executeQuery('SHOW TABLES').",
+    );
   }
 
   /**
-   * Validate a schema definition
+   * Validate a schema definition.
+   *
+   * @deprecated No `/schema/validate` route exists in gateway v2.
    */
-  async validateSchema(schema: object): Promise<ValidationResult> {
-    const { data } = await this.synapCores._getHttpClient().post('/schema/validate', {
-      schema,
-    });
-
-    return {
-      is_valid: data.is_valid || data.valid,
-      errors: data.errors || [],
-      warnings: data.warnings || [],
-    };
+  async validateSchema(_schema: object): Promise<ValidationResult> {
+    throw new NotImplementedError(
+      'client.schema.validateSchema is removed — no /schema/validate route ' +
+        'exists in gateway v2. Attempt the DDL via client.createTable() / ' +
+        'client.executeQuery() and handle the returned error instead.',
+    );
   }
 
   /**
-   * Compare two schemas
+   * Compare two schemas.
+   *
+   * @deprecated No `/schema/compare` route exists in gateway v2.
    */
   async compareSchemas(
-    schema1: string | object,
-    schema2: string | object
+    _schema1: string | object,
+    _schema2: string | object,
   ): Promise<{
     differences: any[];
     added: string[];
     removed: string[];
     modified: string[];
   }> {
-    const { data } = await this.synapCores._getHttpClient().post('/schema/compare', {
-      schema1,
-      schema2,
-    });
-
-    return {
-      differences: data.differences || [],
-      added: data.added || [],
-      removed: data.removed || [],
-      modified: data.modified || [],
-    };
-  }
-
-  /**
-   * Generate SQL DDL for a table
-   */
-  async generateDDL(tableName: string): Promise<string> {
-    const { data } = await this.synapCores._getHttpClient().get(
-      `/schema/tables/${tableName}/ddl`
+    throw new NotImplementedError(
+      'client.schema.compareSchemas is removed — no /schema/compare route ' +
+        'exists in gateway v2. Diff two client.schema.getTable() results ' +
+        'client-side instead.',
     );
-
-    return data.ddl || data.sql;
   }
 
   /**
-   * Analyze table and update statistics
+   * Generate SQL DDL for a table.
+   *
+   * @deprecated No `/schema/tables/:t/ddl` route exists in gateway v2.
+   */
+  async generateDDL(_tableName: string): Promise<string> {
+    throw new NotImplementedError(
+      'client.schema.generateDDL is removed — no DDL-generation route exists ' +
+        "in gateway v2. Use client.executeQuery('SHOW CREATE TABLE <name>') " +
+        'if supported by your engine build.',
+    );
+  }
+
+  /**
+   * Analyze table and update statistics.
+   *
+   * @deprecated No `/schema/tables/:t/analyze` route exists in gateway v2.
    */
   async analyzeTable(tableName: string): Promise<void> {
-    await this.synapCores._getHttpClient().post(`/schema/tables/${tableName}/analyze`);
+    throw new NotImplementedError(
+      'client.schema.analyzeTable is removed — no analyze route exists in ' +
+        `gateway v2. Run client.executeQuery('ANALYZE ${tableName}') if your ` +
+        'engine build supports it.',
+    );
   }
 }

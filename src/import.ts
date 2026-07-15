@@ -1,8 +1,16 @@
 /**
  * Data Import/Export Client for SynapCores SDK
+ *
+ * Reconciled for gateway v2 (0.6.0): the served surface is a pair of
+ * multipart file-upload endpoints — `POST /data/import/csv` and
+ * `POST /data/import/json`. The batch job/export/validate/template surface
+ * that older SDK builds assumed was never part of the v2 gateway; those
+ * methods now throw {@link NotImplementedError} pointing at the supported
+ * path.
  */
 
 import { SynapCores } from './client';
+import { NotImplementedError } from './errors';
 import {
   ImportOptions,
   ImportResult,
@@ -20,288 +28,225 @@ export class ImportExportClient {
   constructor(private readonly synapCores: SynapCores) {}
 
   /**
-   * Import data into a table
+   * Import data into a table from a CSV or JSON payload.
+   *
+   * Gateway (v2): `POST /data/import/{csv|json}` (multipart/form-data). The
+   * endpoint is chosen from `options.format`. The file/content is sent under
+   * the `file` field; table + parsing hints map to the handler's field names
+   * (`table` → `table_name`, `skip_header` → `has_headers`, `primary_keys`
+   * → `primary_key`).
    */
   async import(options: ImportOptions): Promise<ImportResult> {
-    const formData = new FormData();
-    formData.append('table', options.table);
-    formData.append('format', options.format);
+    const format = (options.format || 'csv').toLowerCase();
+    if (format !== 'csv' && format !== 'json') {
+      throw new NotImplementedError(
+        `client.import.import only supports 'csv' and 'json' on gateway v2 ` +
+          `(got '${options.format}'). Load other formats via ` +
+          'client.executeQuery() INSERT statements.',
+      );
+    }
 
-    if (options.mode) formData.append('mode', options.mode);
-    if (options.column_mapping) {
-      formData.append('column_mapping', JSON.stringify(options.column_mapping));
+    // Dynamic import to support both Node.js and browser environments.
+    let FormDataClass: any;
+    try {
+      FormDataClass = require('form-data');
+    } catch {
+      FormDataClass = FormData;
+    }
+    const formData = new FormDataClass();
+
+    // Handler-side field names (see routes/data_import.rs).
+    formData.append('table_name', options.table);
+    if (options.mode === 'replace') {
+      formData.append('drop_existing', 'true');
     }
     if (options.skip_header !== undefined) {
-      formData.append('skip_header', options.skip_header.toString());
+      formData.append('has_headers', options.skip_header.toString());
     }
     if (options.delimiter) formData.append('delimiter', options.delimiter);
     if (options.batch_size) formData.append('batch_size', options.batch_size.toString());
-    if (options.continue_on_error !== undefined) {
-      formData.append('continue_on_error', options.continue_on_error.toString());
-    }
-    if (options.primary_keys) {
-      formData.append('primary_keys', JSON.stringify(options.primary_keys));
+    if (options.primary_keys && options.primary_keys.length > 0) {
+      formData.append('primary_key', options.primary_keys[0]);
     }
 
-    // Handle data as file or direct content
+    // File content is always uploaded under the `file` field.
     if (Buffer.isBuffer(options.data)) {
-      formData.append('file', new Blob([options.data]), 'data');
+      formData.append('file', options.data, { filename: `data.${format}` });
     } else {
-      formData.append('data', options.data);
+      // Browser/string content — wrap as a Blob when available.
+      if (typeof Blob !== 'undefined') {
+        formData.append('file', new Blob([options.data as any]), `data.${format}`);
+      } else {
+        formData.append('file', Buffer.from(String(options.data)), {
+          filename: `data.${format}`,
+        });
+      }
     }
 
-    const { data } = await this.synapCores._getHttpClient().post('/import', formData, {
-      headers: {
-        'Content-Type': 'multipart/form-data',
-      },
-    });
+    const headers: Record<string, string> = {};
+    if (typeof formData.getHeaders === 'function') {
+      Object.assign(headers, formData.getHeaders());
+    } else {
+      headers['Content-Type'] = 'multipart/form-data';
+    }
 
-    return {
-      id: data.id || data.job_id,
-      success: data.success,
-      rows_processed: data.rows_processed || 0,
-      rows_imported: data.rows_imported || 0,
-      rows_failed: data.rows_failed || 0,
-      duration_ms: data.duration_ms || data.took_ms || 0,
-      errors: data.errors || [],
-      warnings: data.warnings || [],
-    };
-  }
-
-  /**
-   * Export data from a table or query
-   */
-  async export(options: ExportOptions): Promise<ExportResult> {
-    const { data } = await this.synapCores._getHttpClient().post('/export', {
-      source: options.source,
-      format: options.format,
-      destination: options.destination || 'response',
-      columns: options.columns,
-      filter: options.filter,
-      order_by: options.order_by,
-      limit: options.limit,
-      include_header: options.include_header,
-      delimiter: options.delimiter,
-      compress: options.compress,
-    });
-
-    return {
-      id: data.id || data.job_id,
-      success: data.success,
-      rows_exported: data.rows_exported || 0,
-      duration_ms: data.duration_ms || data.took_ms || 0,
-      file_path: data.file_path,
-      data: data.data,
-      size_bytes: data.size_bytes,
-      download_url: data.download_url,
-      expires_at: data.expires_at ? new Date(data.expires_at) : undefined,
-    };
-  }
-
-  /**
-   * Get import job status
-   */
-  async getImportStatus(jobId: string): Promise<ImportJobStatus> {
-    const { data } = await this.synapCores._getHttpClient().get(`/import/${jobId}/status`);
-
-    return {
-      id: data.id || jobId,
-      status: data.status,
-      progress: data.progress || 0,
-      phase: data.phase,
-      rows_processed: data.rows_processed,
-      eta_ms: data.eta_ms || data.estimated_time_remaining_ms,
-      error: data.error,
-      started_at: data.started_at ? new Date(data.started_at) : undefined,
-      completed_at: data.completed_at ? new Date(data.completed_at) : undefined,
-    };
-  }
-
-  /**
-   * Get export job status
-   */
-  async getExportStatus(jobId: string): Promise<ExportJobStatus> {
-    const { data } = await this.synapCores._getHttpClient().get(`/export/${jobId}/status`);
-
-    return {
-      id: data.id || jobId,
-      status: data.status,
-      progress: data.progress || 0,
-      phase: data.phase,
-      rows_exported: data.rows_exported,
-      eta_ms: data.eta_ms || data.estimated_time_remaining_ms,
-      error: data.error,
-      started_at: data.started_at ? new Date(data.started_at) : undefined,
-      completed_at: data.completed_at ? new Date(data.completed_at) : undefined,
-    };
-  }
-
-  /**
-   * Cancel an import job
-   */
-  async cancelImport(jobId: string): Promise<void> {
-    await this.synapCores._getHttpClient().post(`/import/${jobId}/cancel`);
-  }
-
-  /**
-   * Cancel an export job
-   */
-  async cancelExport(jobId: string): Promise<void> {
-    await this.synapCores._getHttpClient().post(`/export/${jobId}/cancel`);
-  }
-
-  /**
-   * Import data from multiple sources in bulk
-   */
-  async bulkImport(options: BulkImportOptions): Promise<BulkImportResult> {
-    const { data } = await this.synapCores._getHttpClient().post('/import/bulk', {
-      jobs: options.jobs,
-      parallel: options.parallel || false,
-      stop_on_error: options.stop_on_error || false,
-    });
-
-    return {
-      id: data.id || data.bulk_id,
-      success: data.success,
-      results: data.results || [],
-      total_rows_imported: data.total_rows_imported || 0,
-      total_duration_ms: data.total_duration_ms || data.took_ms || 0,
-    };
-  }
-
-  /**
-   * Validate data before import
-   */
-  async validateData(options: DataValidationOptions): Promise<DataValidationResult> {
-    const { data } = await this.synapCores._getHttpClient().post('/import/validate', {
-      table: options.table,
-      data: options.data,
-      mode: options.mode || 'strict',
-      check_foreign_keys: options.check_foreign_keys,
-      check_unique: options.check_unique,
-    });
-
-    return {
-      is_valid: data.is_valid || data.valid,
-      errors: data.errors || [],
-      warnings: data.warnings || [],
-      rows_validated: data.rows_validated || options.data.length,
-    };
-  }
-
-  /**
-   * Get import template for a table
-   */
-  async getImportTemplate(
-    tableName: string,
-    format: 'csv' | 'json' = 'csv'
-  ): Promise<string> {
-    const { data } = await this.synapCores._getHttpClient().get(
-      `/import/template/${tableName}?format=${format}`
+    const { data } = await this.synapCores._getHttpClient().post(
+      `/data/import/${format}`,
+      formData,
+      { headers },
     );
 
-    return data.template || data.content || data;
+    return {
+      id: data.id || data.job_id || '',
+      success: data.success !== false,
+      rows_processed: data.rows_processed ?? data.rows_imported ?? 0,
+      rows_imported: data.rows_imported ?? 0,
+      rows_failed: data.rows_failed ?? 0,
+      duration_ms: data.duration_ms || data.took_ms || 0,
+      errors: data.errors || [],
+      warnings: data.warnings || [],
+    };
   }
 
   /**
-   * List import/export jobs
+   * Export data from a table or query.
+   *
+   * @deprecated The gateway v2 surface has no `/export` route. Export via
+   * `client.executeQuery('SELECT ...')` and serialize the returned rows
+   * client-side.
    */
-  async listJobs(options: {
+  async export(_options: ExportOptions): Promise<ExportResult> {
+    throw new NotImplementedError(
+      'client.import.export is removed — no /export route exists in gateway ' +
+        "v2. Run client.executeQuery('SELECT ...') and serialize the rows.",
+    );
+  }
+
+  /**
+   * @deprecated Import is synchronous on gateway v2; there is no job-status
+   * route. {@link import} returns the final result directly.
+   */
+  async getImportStatus(_jobId: string): Promise<ImportJobStatus> {
+    throw new NotImplementedError(
+      'client.import.getImportStatus is removed — imports are synchronous on ' +
+        'gateway v2 and return their result directly from client.import.import().',
+    );
+  }
+
+  /**
+   * @deprecated No `/export` route exists in gateway v2.
+   */
+  async getExportStatus(_jobId: string): Promise<ExportJobStatus> {
+    throw new NotImplementedError(
+      'client.import.getExportStatus is removed — no /export route exists in ' +
+        'gateway v2.',
+    );
+  }
+
+  /**
+   * @deprecated Imports are synchronous on gateway v2; nothing to cancel.
+   */
+  async cancelImport(_jobId: string): Promise<void> {
+    throw new NotImplementedError(
+      'client.import.cancelImport is removed — imports are synchronous on ' +
+        'gateway v2 and cannot be cancelled mid-flight.',
+    );
+  }
+
+  /**
+   * @deprecated No `/export` route exists in gateway v2.
+   */
+  async cancelExport(_jobId: string): Promise<void> {
+    throw new NotImplementedError(
+      'client.import.cancelExport is removed — no /export route exists in ' +
+        'gateway v2.',
+    );
+  }
+
+  /**
+   * @deprecated No bulk/multi-source import route exists in gateway v2. Call
+   * {@link import} once per source.
+   */
+  async bulkImport(_options: BulkImportOptions): Promise<BulkImportResult> {
+    throw new NotImplementedError(
+      'client.import.bulkImport is removed — no bulk-import route exists in ' +
+        'gateway v2. Call client.import.import() once per source instead.',
+    );
+  }
+
+  /**
+   * @deprecated No `/import/validate` route exists in gateway v2. The
+   * import endpoints validate on ingest and report row errors in the result.
+   */
+  async validateData(_options: DataValidationOptions): Promise<DataValidationResult> {
+    throw new NotImplementedError(
+      'client.import.validateData is removed — no /import/validate route ' +
+        'exists in gateway v2. client.import.import() validates on ingest and ' +
+        'reports row errors in its result.',
+    );
+  }
+
+  /**
+   * @deprecated No import-template route exists in gateway v2. Derive the
+   * column list from `client.schema.getTable(name)`.
+   */
+  async getImportTemplate(_tableName: string, _format: 'csv' | 'json' = 'csv'): Promise<string> {
+    throw new NotImplementedError(
+      'client.import.getImportTemplate is removed — no template route exists ' +
+        'in gateway v2. Build a header row from ' +
+        'client.schema.getTable(name).columns.',
+    );
+  }
+
+  /**
+   * @deprecated Imports are synchronous on gateway v2; there is no job list.
+   */
+  async listJobs(_options: {
     type?: 'import' | 'export';
     status?: string;
     limit?: number;
   } = {}): Promise<Array<ImportJobStatus | ExportJobStatus>> {
-    const params = new URLSearchParams();
-    if (options.type) params.append('type', options.type);
-    if (options.status) params.append('status', options.status);
-    if (options.limit) params.append('limit', options.limit.toString());
-
-    const { data } = await this.synapCores._getHttpClient().get(
-      `/import/jobs?${params.toString()}`
+    throw new NotImplementedError(
+      'client.import.listJobs is removed — imports are synchronous on gateway ' +
+        'v2 and are not tracked as jobs.',
     );
-
-    return (data.jobs || data).map((job: any) => ({
-      id: job.id,
-      status: job.status,
-      progress: job.progress || 0,
-      phase: job.phase,
-      rows_processed: job.rows_processed,
-      rows_exported: job.rows_exported,
-      eta_ms: job.eta_ms,
-      error: job.error,
-      started_at: job.started_at ? new Date(job.started_at) : undefined,
-      completed_at: job.completed_at ? new Date(job.completed_at) : undefined,
-    }));
   }
 
   /**
-   * Download exported data
+   * @deprecated No `/export` route exists in gateway v2.
    */
-  async downloadExport(jobId: string): Promise<Buffer> {
-    const { data } = await this.synapCores._getHttpClient().get(`/export/${jobId}/download`, {
-      responseType: 'arraybuffer',
-    });
-
-    return Buffer.from(data);
+  async downloadExport(_jobId: string): Promise<Buffer> {
+    throw new NotImplementedError(
+      'client.import.downloadExport is removed — no /export route exists in ' +
+        'gateway v2.',
+    );
   }
 
   /**
-   * Stream import data (for large files)
+   * @deprecated Streaming import polling relied on job-status routes that do
+   * not exist in gateway v2. Call {@link import} directly — it returns the
+   * final result synchronously.
    */
   async streamImport(
-    options: ImportOptions,
-    onProgress?: (progress: ImportJobStatus) => void
+    _options: ImportOptions,
+    _onProgress?: (progress: ImportJobStatus) => void,
   ): Promise<ImportResult> {
-    // Start the import
-    const result = await this.import(options);
-    const jobId = result.id;
-
-    // Poll for status if progress callback provided
-    if (onProgress) {
-      const pollInterval = setInterval(async () => {
-        try {
-          const status = await this.getImportStatus(jobId);
-          onProgress(status);
-
-          if (status.status === 'completed' || status.status === 'failed' || status.status === 'cancelled') {
-            clearInterval(pollInterval);
-          }
-        } catch (error) {
-          clearInterval(pollInterval);
-        }
-      }, 1000);
-    }
-
-    return result;
+    throw new NotImplementedError(
+      'client.import.streamImport is removed — gateway v2 imports are ' +
+        'synchronous. Call client.import.import() directly.',
+    );
   }
 
   /**
-   * Stream export data (for large datasets)
+   * @deprecated No `/export` route exists in gateway v2.
    */
   async streamExport(
-    options: ExportOptions,
-    onProgress?: (progress: ExportJobStatus) => void
+    _options: ExportOptions,
+    _onProgress?: (progress: ExportJobStatus) => void,
   ): Promise<ExportResult> {
-    // Start the export
-    const result = await this.export(options);
-    const jobId = result.id;
-
-    // Poll for status if progress callback provided
-    if (onProgress) {
-      const pollInterval = setInterval(async () => {
-        try {
-          const status = await this.getExportStatus(jobId);
-          onProgress(status);
-
-          if (status.status === 'completed' || status.status === 'failed' || status.status === 'cancelled') {
-            clearInterval(pollInterval);
-          }
-        } catch (error) {
-          clearInterval(pollInterval);
-        }
-      }, 1000);
-    }
-
-    return result;
+    throw new NotImplementedError(
+      'client.import.streamExport is removed — no /export route exists in ' +
+        'gateway v2.',
+    );
   }
 }

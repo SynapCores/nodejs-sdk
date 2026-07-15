@@ -50,7 +50,6 @@ import {
   BatchQueryRequest,
   BatchQueryResponse,
   CreateCollectionRequest,
-  CreateCollectionResponse,
   ListCollectionsResponse,
   MultimediaInfo,
   ListMultimediaResponse,
@@ -63,7 +62,7 @@ import {
   ServerError,
   RateLimitError,
   SynapCoresError,
-  VectorError,
+  NotImplementedError,
 } from './errors';
 import { Document } from './types/collection';
 
@@ -111,13 +110,15 @@ export class SynapCores {
       ? new (require('https').Agent)({ rejectUnauthorized: false })
       : undefined;
 
-    // Determine authentication header
+    // Determine authentication header.
+    // The gateway authenticates BOTH JWTs and API keys via the
+    // `Authorization: Bearer <token>` header. API keys sent as `X-API-Key`
+    // are rejected with 401, so API keys must also use the Bearer scheme.
     const authHeader: Record<string, string> = {};
     if (this.config.jwtToken) {
       authHeader['Authorization'] = `Bearer ${this.config.jwtToken}`;
     } else if (this.config.apiKey) {
-      // Use X-API-Key header for API keys (not Bearer)
-      authHeader['X-API-Key'] = this.config.apiKey;
+      authHeader['Authorization'] = `Bearer ${this.config.apiKey}`;
     }
 
     this.httpClient = axios.create({
@@ -125,15 +126,30 @@ export class SynapCores {
       timeout: this.config.timeout,
       headers: {
         'Content-Type': 'application/json',
-        'User-Agent': 'synapcores-nodejs/0.5.0',
+        'User-Agent': 'synapcores-nodejs/0.6.0',
         ...authHeader,
       },
       ...(httpsAgent && { httpsAgent }),
     });
 
-    // Add response interceptor for error handling
+    // Add response interceptor for error handling and envelope unwrapping.
+    // The gateway wraps every success as `{ data: <payload>, meta: {...} }`.
+    // Unwrap centrally so every method/sub-client receives the bare payload
+    // (restores the 0.4.2 behavior lost in 0.5.0). Bodies that are not the
+    // envelope shape are passed through untouched.
     this.httpClient.interceptors.response.use(
-      (response) => response,
+      (response) => {
+        const body = response.data;
+        if (
+          body &&
+          typeof body === 'object' &&
+          'data' in body &&
+          'meta' in body
+        ) {
+          response.data = (body as { data: unknown }).data;
+        }
+        return response;
+      },
       (error) => this.handleError(error),
     );
 
@@ -254,15 +270,18 @@ export class SynapCores {
    * Create collection matching the database integration guide format
    */
   async createCollectionWithSchema(request: CreateCollectionRequest): Promise<Collection> {
-    const { data } = await this.httpClient.post<CreateCollectionResponse>('/collections', {
+    const { data } = await this.httpClient.post<any>('/collections', {
       name: request.name,
       description: request.description,
       schema: request.schema,
     });
-    
-    const collection = new Collection(this, request.name, data.collection.schema);
+
+    // Gateway (v2) returns the collection info at the top level
+    // (`{ name, document_count, ... }`), not wrapped in `{ collection }`.
+    const schema = data?.collection?.schema ?? data?.schema ?? request.schema;
+    const collection = new Collection(this, request.name, schema);
     this.collectionsCache.set(request.name, collection);
-    
+
     return collection;
   }
 
@@ -284,7 +303,13 @@ export class SynapCores {
    */
   async listCollections(): Promise<string[]> {
     const result = await this.listCollectionsDetailed();
-    return result.collections.map(c => c.name);
+    // Gateway (v2) paginates as `{ items: [...] }`; older shape was
+    // `{ collections: [...] }`. Tolerate both (and a bare array).
+    const arr: any[] =
+      (result as any).collections ||
+      (result as any).items ||
+      (Array.isArray(result) ? (result as any) : []);
+    return arr.map((c: any) => c.name);
   }
 
   /**
@@ -372,15 +397,28 @@ export class SynapCores {
     text: string | string[],
     options: EmbedOptions = {},
   ): Promise<number[] | number[][]> {
-    const isBatch = Array.isArray(text);
-    const texts = isBatch ? text : [text];
+    // The gateway serves `POST /v1/ai/embeddings` and accepts a single
+    // `{ text }` per request, returning `{ embeddings: number[], ... }`
+    // (the envelope's `data` is unwrapped by the response interceptor).
+    // For array input we embed each string and collect into number[][].
+    const embedOne = async (value: string): Promise<number[]> => {
+      const body: Record<string, unknown> = { text: value };
+      if (options.model) {
+        body.model = options.model;
+      }
+      const { data } = await this.httpClient.post('/ai/embeddings', body);
+      return data.embeddings as number[];
+    };
 
-    const { data } = await this.httpClient.post('/ai/embed', {
-      texts,
-      model: options.model || 'default',
-    });
+    if (Array.isArray(text)) {
+      const results: number[][] = [];
+      for (const value of text) {
+        results.push(await embedOne(value));
+      }
+      return results;
+    }
 
-    return isBatch ? data.embeddings : data.embeddings[0];
+    return embedOne(text);
   }
 
   // Internal method for HTTP client access
@@ -528,7 +566,9 @@ export class SynapCores {
    * @returns Promise resolving to table information
    */
   async describeTable(tableName: string): Promise<TableInfo> {
-    const { data } = await this.httpClient.get(`/table/${tableName}/info`);
+    // Gateway (v2): the schema-introspection route is GET /schema/tables/:name
+    // (there is no /table/:name/info route).
+    const { data } = await this.httpClient.get(`/schema/tables/${tableName}`);
     return data;
   }
 
@@ -684,64 +724,34 @@ export class SynapCores {
    * @param options - Batch insert options with table, columns, and rows
    * @returns Promise resolving to batch operation result
    */
-  async batchInsert(options: BatchInsertOptions): Promise<BatchResult> {
-    const { data } = await this.httpClient.post('/batch/insert', {
-      table_name: options.tableName,
-      columns: options.columns,
-      rows: options.rows,
-      on_conflict: options.onConflict,
-      batch_size: options.batchSize || 1000
-    });
-
-    return {
-      totalProcessed: data.total_processed,
-      successful: data.successful,
-      failed: data.failed,
-      errors: data.errors,
-      tookMs: data.took_ms
-    };
+  async batchInsert(_options: BatchInsertOptions): Promise<BatchResult> {
+    throw new NotImplementedError(
+      'client.batchInsert is removed — gateway v2 has no /batch/insert route. ' +
+        'Use client.executeBatchQueries({ queries: [...] }) (POST /query/execute/batch) ' +
+        'with INSERT statements instead.',
+    );
   }
 
   /**
-   * Performs batch update operations
-   * @param options - Batch update options with table and update conditions
-   * @returns Promise resolving to batch operation result
+   * Performs batch update operations.
+   * @deprecated No `/batch/update` route in gateway v2.
    */
-  async batchUpdate(options: BatchUpdateOptions): Promise<BatchResult> {
-    const { data } = await this.httpClient.post('/batch/update', {
-      table_name: options.tableName,
-      updates: options.updates,
-      batch_size: options.batchSize || 1000
-    });
-
-    return {
-      totalProcessed: data.total_processed,
-      successful: data.successful,
-      failed: data.failed,
-      errors: data.errors,
-      tookMs: data.took_ms
-    };
+  async batchUpdate(_options: BatchUpdateOptions): Promise<BatchResult> {
+    throw new NotImplementedError(
+      'client.batchUpdate is removed — gateway v2 has no /batch/update route. ' +
+        'Use client.executeBatchQueries({ queries: [...] }) with UPDATE statements instead.',
+    );
   }
 
   /**
-   * Performs batch delete operations
-   * @param options - Batch delete options with table and where conditions
-   * @returns Promise resolving to batch operation result
+   * Performs batch delete operations.
+   * @deprecated No `/batch/delete` route in gateway v2.
    */
-  async batchDelete(options: BatchDeleteOptions): Promise<BatchResult> {
-    const { data } = await this.httpClient.post('/batch/delete', {
-      table_name: options.tableName,
-      where_conditions: options.whereConditions,
-      batch_size: options.batchSize || 1000
-    });
-
-    return {
-      totalProcessed: data.total_processed,
-      successful: data.successful,
-      failed: data.failed,
-      errors: data.errors,
-      tookMs: data.took_ms
-    };
+  async batchDelete(_options: BatchDeleteOptions): Promise<BatchResult> {
+    throw new NotImplementedError(
+      'client.batchDelete is removed — gateway v2 has no /batch/delete route. ' +
+        'Use client.executeBatchQueries({ queries: [...] }) with DELETE statements instead.',
+    );
   }
 
   // =================================================================
@@ -755,7 +765,8 @@ export class SynapCores {
    * @returns Promise resolving to prepared statement
    */
   async prepareStatement(sql: string, options: PreparedStatementOptions = {}): Promise<PreparedStatement> {
-    const { data } = await this.httpClient.post('/prepare', {
+    // Gateway (v2): POST /query/prepare (query_prepared is nested under /query).
+    const { data } = await this.httpClient.post('/query/prepare', {
       sql,
       name: options.name,
       parameter_types: options.parameterTypes
@@ -786,7 +797,8 @@ export class SynapCores {
       statementId = this.preparedStatements.get(statementId)!.id;
     }
 
-    const { data } = await this.httpClient.post('/execute-prepared', {
+    // Gateway (v2): POST /query/exec.
+    const { data } = await this.httpClient.post('/query/exec', {
       statement_id: statementId,
       parameters: params
     });
@@ -806,12 +818,14 @@ export class SynapCores {
    * @returns Promise resolving when statement is deallocated
    */
   async deallocatePrepared(statementId: string): Promise<void> {
+    // Gateway (v2): POST /query/close { statement_id } (there is no
+    // DELETE /prepare/:id route).
     if (this.preparedStatements.has(statementId)) {
       const prepared = this.preparedStatements.get(statementId)!;
-      await this.httpClient.delete(`/prepare/${prepared.id}`);
+      await this.httpClient.post('/query/close', { statement_id: prepared.id });
       this.preparedStatements.delete(statementId);
     } else {
-      await this.httpClient.delete(`/prepare/${statementId}`);
+      await this.httpClient.post('/query/close', { statement_id: statementId });
     }
   }
 
@@ -917,269 +931,114 @@ export class SynapCores {
   // VECTOR OPERATIONS
   // =================================================================
 
-  /**
-   * Performs vector addition
-   * @param vector1 - First vector
-   * @param vector2 - Second vector
-   * @returns Promise resolving to vector addition result
-   */
-  async vectorAdd(vector1: number[], vector2: number[]): Promise<VectorArithmeticResult> {
-    if (vector1.length !== vector2.length) {
-      throw new VectorError('Vector dimensions must match', 'DIMENSION_MISMATCH');
-    }
+  // NOTE (0.6.0 reconciliation): the standalone per-operation vector-algebra
+  // routes (`/vectors/add`, `/vectors/cosine-similarity`, `/vectors/knn-search`,
+  // …) do NOT exist on the gateway v2 surface served at /v1. Vector math moved
+  // to first-class SQL functions — COSINE_SIMILARITY, L2_DISTANCE,
+  // INNER_PRODUCT, VECTOR_ADD, VECTOR_SUBTRACT, VECTOR_NORMALIZE,
+  // VECTOR_MAGNITUDE, etc. — reachable via client.executeQuery(). Batch/project
+  // vector ops live under POST /vector-algebra/operation. Each helper below
+  // therefore throws NotImplementedError with the SQL replacement rather than
+  // silently 404-ing.
 
-    const { data } = await this.httpClient.post('/vectors/add', {
-      vector1,
-      vector2
-    });
+  private static readonly VECTOR_ALGEBRA_HINT =
+    'Vector algebra moved to SQL functions on gateway v2. Use ' +
+    'client.executeQuery("SELECT COSINE_SIMILARITY($1, $2)", { parameters: [a, b] }) ' +
+    'and the sibling functions (L2_DISTANCE, INNER_PRODUCT, VECTOR_ADD, ' +
+    'VECTOR_SUBTRACT, VECTOR_SCALAR_MULTIPLY, VECTOR_NORMALIZE, ' +
+    'VECTOR_MAGNITUDE), or POST /vector-algebra/operation for batch ops.';
 
-    return {
-      result: { values: data.result, dimensions: data.result.length },
-      operation: 'addition',
-      tookMs: data.took_ms
-    };
+  /** @deprecated Use `executeQuery("SELECT VECTOR_ADD($1,$2)", …)`. */
+  async vectorAdd(_vector1: number[], _vector2: number[]): Promise<VectorArithmeticResult> {
+    throw new NotImplementedError(
+      'client.vectorAdd is removed — ' + SynapCores.VECTOR_ALGEBRA_HINT,
+    );
+  }
+
+  /** @deprecated Use `executeQuery("SELECT VECTOR_SUBTRACT($1,$2)", …)`. */
+  async vectorSubtract(_vector1: number[], _vector2: number[]): Promise<VectorArithmeticResult> {
+    throw new NotImplementedError(
+      'client.vectorSubtract is removed — ' + SynapCores.VECTOR_ALGEBRA_HINT,
+    );
+  }
+
+  /** @deprecated Use `executeQuery("SELECT VECTOR_SCALAR_MULTIPLY($1,$2)", …)`. */
+  async vectorScalarMultiply(_vector: number[], _scalar: number): Promise<VectorArithmeticResult> {
+    throw new NotImplementedError(
+      'client.vectorScalarMultiply is removed — ' + SynapCores.VECTOR_ALGEBRA_HINT,
+    );
+  }
+
+  /** @deprecated Use `executeQuery("SELECT INNER_PRODUCT($1,$2)", …)`. */
+  async vectorDotProduct(_vector1: number[], _vector2: number[]): Promise<{ dotProduct: number; tookMs: number }> {
+    throw new NotImplementedError(
+      'client.vectorDotProduct is removed — ' + SynapCores.VECTOR_ALGEBRA_HINT,
+    );
+  }
+
+  /** @deprecated Use `executeQuery("SELECT COSINE_SIMILARITY($1,$2)", …)`. */
+  async cosineSimilarity(_vector1: number[], _vector2: number[]): Promise<VectorSimilarityResult> {
+    throw new NotImplementedError(
+      'client.cosineSimilarity is removed — ' + SynapCores.VECTOR_ALGEBRA_HINT,
+    );
+  }
+
+  /** @deprecated Use `executeQuery("SELECT L2_DISTANCE($1,$2)", …)`. */
+  async l2Distance(_vector1: number[], _vector2: number[]): Promise<VectorSimilarityResult> {
+    throw new NotImplementedError(
+      'client.l2Distance is removed — ' + SynapCores.VECTOR_ALGEBRA_HINT,
+    );
+  }
+
+  /** @deprecated Use `executeQuery("SELECT INNER_PRODUCT($1,$2)", …)`. */
+  async innerProduct(_vector1: number[], _vector2: number[]): Promise<VectorSimilarityResult> {
+    throw new NotImplementedError(
+      'client.innerProduct is removed — ' + SynapCores.VECTOR_ALGEBRA_HINT,
+    );
   }
 
   /**
-   * Performs vector subtraction
-   * @param vector1 - First vector (minuend)
-   * @param vector2 - Second vector (subtrahend)
-   * @returns Promise resolving to vector subtraction result
+   * @deprecated No `/vectors/knn-search` route on gateway v2. Use an ORDER BY
+   * distance query, e.g.
+   * `executeQuery("SELECT id FROM t ORDER BY L2_DISTANCE(embedding, $1) LIMIT $2", …)`,
+   * or the collection-based vector search under /vectors/collections/:c/search.
    */
-  async vectorSubtract(vector1: number[], vector2: number[]): Promise<VectorArithmeticResult> {
-    if (vector1.length !== vector2.length) {
-      throw new VectorError('Vector dimensions must match', 'DIMENSION_MISMATCH');
-    }
-
-    const { data } = await this.httpClient.post('/vectors/subtract', {
-      vector1,
-      vector2
-    });
-
-    return {
-      result: { values: data.result, dimensions: data.result.length },
-      operation: 'subtraction',
-      tookMs: data.took_ms
-    };
+  async knnSearch(_options: KNNSearchOptions): Promise<VectorSearchResult[]> {
+    throw new NotImplementedError(
+      'client.knnSearch is removed — no /vectors/knn-search route on gateway v2. ' +
+        'Use executeQuery("SELECT ... ORDER BY L2_DISTANCE(col, $1) LIMIT $2", …) ' +
+        'or POST /vectors/collections/:c/search.',
+    );
   }
 
-  /**
-   * Performs scalar multiplication on a vector
-   * @param vector - Input vector
-   * @param scalar - Scalar value to multiply by
-   * @returns Promise resolving to scalar multiplication result
-   */
-  async vectorScalarMultiply(vector: number[], scalar: number): Promise<VectorArithmeticResult> {
-    const { data } = await this.httpClient.post('/vectors/scalar-multiply', {
-      vector,
-      scalar
-    });
-
-    return {
-      result: { values: data.result, dimensions: data.result.length },
-      operation: 'scalar_multiplication',
-      tookMs: data.took_ms
-    };
+  /** @deprecated No `/vectors/range-search` route on gateway v2 — use a WHERE + ORDER BY distance query. */
+  async rangeSearch(_options: RangeSearchOptions): Promise<VectorSearchResult[]> {
+    throw new NotImplementedError(
+      'client.rangeSearch is removed — no /vectors/range-search route on gateway v2. ' +
+        'Use executeQuery("SELECT ... WHERE COSINE_SIMILARITY(col, $1) >= $2", …).',
+    );
   }
 
-  /**
-   * Calculates the dot product of two vectors
-   * @param vector1 - First vector
-   * @param vector2 - Second vector
-   * @returns Promise resolving to dot product result
-   */
-  async vectorDotProduct(vector1: number[], vector2: number[]): Promise<{ dotProduct: number; tookMs: number }> {
-    if (vector1.length !== vector2.length) {
-      throw new VectorError('Vector dimensions must match', 'DIMENSION_MISMATCH');
-    }
-
-    const { data } = await this.httpClient.post('/vectors/dot-product', {
-      vector1,
-      vector2
-    });
-
-    return {
-      dotProduct: data.dot_product,
-      tookMs: data.took_ms
-    };
+  /** @deprecated No `/vectors/hybrid-search` route on gateway v2 — combine WHERE + ORDER BY distance in one SQL query. */
+  async hybridSearch(_options: HybridSearchOptions): Promise<VectorSearchResult[]> {
+    throw new NotImplementedError(
+      'client.hybridSearch is removed — no /vectors/hybrid-search route on gateway v2. ' +
+        'Combine a SQL filter with ORDER BY COSINE_SIMILARITY(col, $1) in one executeQuery() call.',
+    );
   }
 
-  /**
-   * Calculates cosine similarity between two vectors
-   * @param vector1 - First vector
-   * @param vector2 - Second vector
-   * @returns Promise resolving to cosine similarity result
-   */
-  async cosineSimilarity(vector1: number[], vector2: number[]): Promise<VectorSimilarityResult> {
-    if (vector1.length !== vector2.length) {
-      throw new VectorError('Vector dimensions must match', 'DIMENSION_MISMATCH');
-    }
-
-    const { data } = await this.httpClient.post('/vectors/cosine-similarity', {
-      vector1,
-      vector2
-    });
-
-    return {
-      similarity: data.similarity,
-      function: 'cosine',
-      tookMs: data.took_ms
-    };
+  /** @deprecated Use `executeQuery("SELECT VECTOR_NORMALIZE($1)", …)`. */
+  async normalizeVector(_vector: number[]): Promise<VectorArithmeticResult> {
+    throw new NotImplementedError(
+      'client.normalizeVector is removed — ' + SynapCores.VECTOR_ALGEBRA_HINT,
+    );
   }
 
-  /**
-   * Calculates L2 (Euclidean) distance between two vectors
-   * @param vector1 - First vector
-   * @param vector2 - Second vector
-   * @returns Promise resolving to L2 distance result
-   */
-  async l2Distance(vector1: number[], vector2: number[]): Promise<VectorSimilarityResult> {
-    if (vector1.length !== vector2.length) {
-      throw new VectorError('Vector dimensions must match', 'DIMENSION_MISMATCH');
-    }
-
-    const { data } = await this.httpClient.post('/vectors/l2-distance', {
-      vector1,
-      vector2
-    });
-
-    return {
-      distance: data.distance,
-      similarity: data.distance, // Include similarity for compatibility
-      function: 'l2',
-      tookMs: data.took_ms
-    };
-  }
-
-  /**
-   * Calculates inner product between two vectors
-   * @param vector1 - First vector
-   * @param vector2 - Second vector
-   * @returns Promise resolving to inner product result
-   */
-  async innerProduct(vector1: number[], vector2: number[]): Promise<VectorSimilarityResult> {
-    if (vector1.length !== vector2.length) {
-      throw new VectorError('Vector dimensions must match', 'DIMENSION_MISMATCH');
-    }
-
-    const { data } = await this.httpClient.post('/vectors/inner-product', {
-      vector1,
-      vector2
-    });
-
-    return {
-      similarity: data.inner_product,
-      function: 'inner_product',
-      tookMs: data.took_ms
-    };
-  }
-
-  /**
-   * Performs K-nearest neighbors vector search
-   * @param options - KNN search options
-   * @returns Promise resolving to KNN search results
-   */
-  async knnSearch(options: KNNSearchOptions): Promise<VectorSearchResult[]> {
-    const { data } = await this.httpClient.post('/vectors/knn-search', {
-      query_vector: options.queryVector,
-      k: options.k,
-      table_name: options.tableName,
-      vector_column: options.vectorColumn,
-      metadata_columns: options.metadataColumns,
-      filter: options.filter
-    });
-
-    return data.results.map((result: any) => ({
-      id: result.id,
-      vector: result.vector,
-      similarity: result.similarity,
-      distance: result.distance,
-      metadata: result.metadata
-    }));
-  }
-
-  /**
-   * Performs range-based vector similarity search
-   * @param options - Range search options
-   * @returns Promise resolving to range search results
-   */
-  async rangeSearch(options: RangeSearchOptions): Promise<VectorSearchResult[]> {
-    const { data } = await this.httpClient.post('/vectors/range-search', {
-      query_vector: options.queryVector,
-      threshold: options.threshold,
-      table_name: options.tableName,
-      vector_column: options.vectorColumn,
-      metadata_columns: options.metadataColumns,
-      filter: options.filter,
-      max_results: options.maxResults
-    });
-
-    return data.results.map((result: any) => ({
-      id: result.id,
-      vector: result.vector,
-      similarity: result.similarity,
-      distance: result.distance,
-      metadata: result.metadata
-    }));
-  }
-
-  /**
-   * Performs hybrid search combining vector similarity and SQL filtering
-   * @param options - Hybrid search options
-   * @returns Promise resolving to hybrid search results
-   */
-  async hybridSearch(options: HybridSearchOptions): Promise<VectorSearchResult[]> {
-    const { data } = await this.httpClient.post('/vectors/hybrid-search', {
-      vector: options.vector,
-      text_query: options.textQuery,
-      sql_filter: options.sqlFilter,
-      k: options.k,
-      threshold: options.threshold,
-      metric: options.metric,
-      filter: options.filter,
-      weights: options.weights
-    });
-
-    return data.results.map((result: any) => ({
-      id: result.id,
-      vector: result.vector,
-      similarity: result.similarity,
-      distance: result.distance,
-      metadata: result.metadata
-    }));
-  }
-
-  /**
-   * Normalizes a vector to unit length
-   * @param vector - Input vector to normalize
-   * @returns Promise resolving to normalized vector
-   */
-  async normalizeVector(vector: number[]): Promise<VectorArithmeticResult> {
-    const { data } = await this.httpClient.post('/vectors/normalize', {
-      vector
-    });
-
-    return {
-      result: { values: data.result, dimensions: data.result.length },
-      operation: 'normalization',
-      tookMs: data.took_ms
-    };
-  }
-
-  /**
-   * Calculates the magnitude (length) of a vector
-   * @param vector - Input vector
-   * @returns Promise resolving to vector magnitude
-   */
-  async vectorMagnitude(vector: number[]): Promise<{ magnitude: number; tookMs: number }> {
-    const { data } = await this.httpClient.post('/vectors/magnitude', {
-      vector
-    });
-
-    return {
-      magnitude: data.magnitude,
-      tookMs: data.took_ms
-    };
+  /** @deprecated Use `executeQuery("SELECT VECTOR_MAGNITUDE($1)", …)`. */
+  async vectorMagnitude(_vector: number[]): Promise<{ magnitude: number; tookMs: number }> {
+    throw new NotImplementedError(
+      'client.vectorMagnitude is removed — ' + SynapCores.VECTOR_ALGEBRA_HINT,
+    );
   }
 
   // =================================================================
@@ -1223,16 +1082,13 @@ export class SynapCores {
    * Refresh JWT token
    */
   async refreshToken(): Promise<RefreshResponse> {
-    const { data } = await this.httpClient.post<RefreshResponse>('/auth/refresh');
-    
-    // Update JWT token in config
-    if (data.access_token) {
-      this.config.jwtToken = data.access_token;
-      this.httpClient.defaults.headers['Authorization'] = `Bearer ${data.access_token}`;
-      delete this.httpClient.defaults.headers['X-API-Key'];
-    }
-    
-    return data;
+    // Gateway v2 exposes no /auth/refresh route — access tokens are obtained
+    // via /auth/login (and the MFA flow). Re-authenticate with login() instead.
+    throw new NotImplementedError(
+      'client.refreshToken is removed — gateway v2 has no /auth/refresh route. ' +
+        'Re-authenticate with client.login({ username, password }) to obtain a ' +
+        'fresh access token.',
+    );
   }
 
   /**
@@ -1280,8 +1136,11 @@ export class SynapCores {
   /**
    * Get API key statistics
    */
-  async getAPIKeyStats(keyId: string): Promise<APIKeyStats> {
-    const { data } = await this.httpClient.get<APIKeyStats>(`/api-keys/${keyId}/stats`);
+  async getAPIKeyStats(_keyId?: string): Promise<APIKeyStats> {
+    // Gateway (v2) exposes aggregate key stats at GET /api-keys/stats — there
+    // is no per-key stats route. The `keyId` argument is accepted for
+    // backward compatibility but ignored.
+    const { data } = await this.httpClient.get<APIKeyStats>('/api-keys/stats');
     return data;
   }
 

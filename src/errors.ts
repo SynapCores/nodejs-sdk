@@ -19,6 +19,19 @@ export class SynapCoresError extends Error {
   }
 }
 
+/**
+ * Thrown by SDK methods whose corresponding gateway route was removed or
+ * relocated in the v2 API surface (the default served at `/v1`). The message
+ * always names the supported alternative so callers are never left with a
+ * silent 404. See the 0.6.0 reconciliation in CHANGELOG.md.
+ */
+export class NotImplementedError extends SynapCoresError {
+  constructor(message: string, details?: Record<string, any>) {
+    super(message, 'NOT_IMPLEMENTED', details);
+    this.name = 'NotImplementedError';
+  }
+}
+
 export class ConnectionError extends SynapCoresError {
   constructor(message: string, details?: Record<string, any>) {
     super(message, 'CONNECTION_ERROR', details);

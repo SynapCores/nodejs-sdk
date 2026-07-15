@@ -209,6 +209,7 @@ export {
   AuthenticationError,
   ValidationError,
   NotFoundError,
+  NotImplementedError,
   ServerError,
   TimeoutError,
   RateLimitError,
@@ -223,4 +224,4 @@ export {
 export { z } from 'zod';
 
 // Version
-export const VERSION = '0.5.0';
+export const VERSION = '0.6.0';

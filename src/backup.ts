@@ -1,8 +1,26 @@
 /**
  * Backup/Restore Client for SynapCores SDK
+ *
+ * Reconciled for gateway v2 (0.6.0). The served surface (routes/backup_v2.rs,
+ * nested at `/backup`) is:
+ *   POST   /backup/backups              create
+ *   GET    /backup/backups              list
+ *   GET    /backup/backups/:id          get
+ *   DELETE /backup/backups/:id          delete
+ *   GET    /backup/backups/:id/download download
+ *   POST   /backup/restore              restore
+ *   GET    /backup/restore/:id/status   restore status
+ *   GET    /backup/schedules            list schedules
+ *   POST   /backup/schedules            create schedule
+ *   GET    /backup/schedules/:id        get schedule
+ *   DELETE /backup/schedules/:id        delete schedule
+ *
+ * Cancel / verify / metrics / schedule-update / schedule-activate are not
+ * part of the v2 surface and now throw {@link NotImplementedError}.
  */
 
 import { SynapCores } from './client';
+import { NotImplementedError } from './errors';
 import {
   BackupOptions,
   Backup,
@@ -21,99 +39,90 @@ export class BackupClient {
   constructor(private readonly synapCores: SynapCores) {}
 
   /**
-   * Create a new backup
+   * Create a new backup. Gateway (v2): `POST /backup/backups`.
    */
   async create(options: BackupOptions = {}): Promise<Backup> {
-    const { data } = await this.synapCores._getHttpClient().post('/backups', {
-      name: options.name,
+    const body: Record<string, unknown> = {
+      name: options.name || `backup_${Date.now()}`,
       description: options.description,
-      type: options.type || 'full',
-      tables: options.tables,
-      include_indexes: options.include_indexes !== false,
-      include_procedures: options.include_procedures !== false,
-      compression: options.compression || 6,
-      encrypt: options.encrypt || false,
-      encryption_key: options.encryption_key,
-      storage: options.storage || 'local',
-      storage_config: options.storage_config,
-      tags: options.tags || [],
-    });
+      // v2 enum: "full" | "incremental"
+      backup_type: (options.type || 'full').toLowerCase(),
+      // v2 renamed `tables` → `collections`; omit (null) means all.
+      collections: options.tables,
+      encryption: options.encrypt || false,
+    };
+    // `compression` is an enum (none|gzip|zstd|lz4) in v2, not a level int —
+    // only forward it when the caller passed a matching string.
+    if (typeof (options as any).compression === 'string') {
+      body.compression = (options as any).compression;
+    }
 
+    const { data } = await this.synapCores._getHttpClient().post('/backup/backups', body);
     return this.mapBackup(data);
   }
 
   /**
-   * List backups with optional filters
+   * List backups. Gateway (v2): `GET /backup/backups`.
    */
   async list(options: ListBackupsOptions = {}): Promise<Backup[]> {
     const params = new URLSearchParams();
-
     if (options.type) params.append('type', options.type);
     if (options.status) params.append('status', options.status);
-    if (options.sort) params.append('sort', options.sort);
-    if (options.order) params.append('order', options.order);
     if (options.page) params.append('page', options.page.toString());
     if (options.page_size) params.append('page_size', options.page_size.toString());
-    if (options.tags && options.tags.length > 0) {
-      params.append('tags', options.tags.join(','));
-    }
 
+    const qs = params.toString();
     const { data } = await this.synapCores._getHttpClient().get(
-      `/backups?${params.toString()}`
+      `/backup/backups${qs ? `?${qs}` : ''}`,
     );
 
-    return (data.backups || data).map((backup: any) => this.mapBackup(backup));
+    return (data.backups || data || []).map((backup: any) => this.mapBackup(backup));
   }
 
   /**
-   * Get a specific backup by ID
+   * Get a specific backup by ID. Gateway (v2): `GET /backup/backups/:id`.
    */
   async get(id: string): Promise<Backup> {
-    const { data } = await this.synapCores._getHttpClient().get(`/backups/${id}`);
+    const { data } = await this.synapCores._getHttpClient().get(`/backup/backups/${id}`);
     return this.mapBackup(data);
   }
 
   /**
-   * Delete a backup
+   * Delete a backup. Gateway (v2): `DELETE /backup/backups/:id`.
    */
   async delete(id: string): Promise<void> {
-    await this.synapCores._getHttpClient().delete(`/backups/${id}`);
+    await this.synapCores._getHttpClient().delete(`/backup/backups/${id}`);
   }
 
   /**
-   * Restore from a backup
+   * Restore from a backup. Gateway (v2): `POST /backup/restore`.
    */
   async restore(options: RestoreOptions): Promise<RestoreResult> {
-    const { data } = await this.synapCores._getHttpClient().post('/backups/restore', {
+    const { data } = await this.synapCores._getHttpClient().post('/backup/restore', {
       backup_id: options.backup_id,
-      mode: options.mode || 'full',
-      tables: options.tables,
-      target_database: options.target_database,
+      collections: options.tables,
       overwrite: options.overwrite || false,
-      skip_indexes: options.skip_indexes || false,
-      skip_procedures: options.skip_procedures || false,
-      decryption_key: options.decryption_key,
-      point_in_time: options.point_in_time?.toISOString(),
-      dry_run: options.dry_run || false,
+      target_prefix: options.target_database,
     });
 
     return {
-      id: data.id || data.restore_id,
-      success: data.success,
-      tables_restored: data.tables_restored || [],
+      id: data.restore_id || data.id,
+      success: data.success ?? (data.status !== 'failed'),
+      tables_restored: data.collections_restored || data.tables_restored || [],
       rows_restored: data.rows_restored || 0,
       duration_ms: data.duration_ms || data.took_ms || 0,
-      error: data.error,
+      error: data.error || data.error_message,
       warnings: data.warnings || [],
     };
   }
 
   /**
-   * Get backup status
+   * Get backup status. Gateway (v2) has no dedicated status route — the
+   * backup record from `GET /backup/backups/:id` already carries `status`.
    */
   async getBackupStatus(backupId: string): Promise<BackupStatus> {
     const { data } = await this.synapCores._getHttpClient().get(
-      `/backups/${backupId}/status`
+      `/backup/backups/${backupId}`,
     );
 
     return {
@@ -122,266 +131,199 @@ export class BackupClient {
       progress: data.progress || 0,
       phase: data.phase,
       tables_processed: data.tables_processed,
-      total_tables: data.total_tables,
-      bytes_processed: data.bytes_processed,
-      eta_ms: data.eta_ms || data.estimated_time_remaining_ms,
-      error: data.error,
-      started_at: data.started_at ? new Date(data.started_at) : undefined,
+      total_tables: Array.isArray(data.collections) ? data.collections.length : data.total_tables,
+      bytes_processed: data.size_bytes ?? data.bytes_processed,
+      eta_ms: data.eta_ms,
+      error: data.error || data.error_message,
+      started_at: data.created_at ? new Date(data.created_at) : undefined,
       completed_at: data.completed_at ? new Date(data.completed_at) : undefined,
     };
   }
 
   /**
-   * Get restore status
+   * Get restore status. Gateway (v2): `GET /backup/restore/:id/status`.
    */
   async getRestoreStatus(restoreId: string): Promise<RestoreStatus> {
     const { data } = await this.synapCores._getHttpClient().get(
-      `/backups/restore/${restoreId}/status`
+      `/backup/restore/${restoreId}/status`,
     );
 
     return {
-      id: data.id || restoreId,
+      id: data.restore_id || data.id || restoreId,
       status: data.status,
       progress: data.progress || 0,
       phase: data.phase,
       tables_processed: data.tables_processed,
       total_tables: data.total_tables,
       rows_processed: data.rows_processed,
-      eta_ms: data.eta_ms || data.estimated_time_remaining_ms,
-      error: data.error,
+      eta_ms: data.eta_ms,
+      error: data.error || data.error_message,
       started_at: data.started_at ? new Date(data.started_at) : undefined,
       completed_at: data.completed_at ? new Date(data.completed_at) : undefined,
     };
   }
 
   /**
-   * Cancel a backup in progress
-   */
-  async cancelBackup(backupId: string): Promise<void> {
-    await this.synapCores._getHttpClient().post(`/backups/${backupId}/cancel`);
-  }
-
-  /**
-   * Cancel a restore in progress
-   */
-  async cancelRestore(restoreId: string): Promise<void> {
-    await this.synapCores._getHttpClient().post(`/backups/restore/${restoreId}/cancel`);
-  }
-
-  /**
-   * Download a backup file
+   * Download a backup file. Gateway (v2): `GET /backup/backups/:id/download`.
    */
   async download(backupId: string): Promise<Buffer> {
     const { data } = await this.synapCores._getHttpClient().get(
-      `/backups/${backupId}/download`,
-      {
-        responseType: 'arraybuffer',
-      }
+      `/backup/backups/${backupId}/download`,
+      { responseType: 'arraybuffer' },
     );
-
     return Buffer.from(data);
   }
 
   /**
-   * Verify backup integrity
-   */
-  async verify(backupId: string): Promise<BackupVerificationResult> {
-    const { data } = await this.synapCores._getHttpClient().post(
-      `/backups/${backupId}/verify`
-    );
-
-    return {
-      is_valid: data.is_valid || data.valid,
-      integrity_ok: data.integrity_ok || data.integrity,
-      checksum_match: data.checksum_match,
-      tables_verified: data.tables_verified || 0,
-      errors: data.errors || [],
-      warnings: data.warnings || [],
-      verified_at: data.verified_at ? new Date(data.verified_at) : new Date(),
-    };
-  }
-
-  /**
-   * Create a backup schedule
+   * Create a backup schedule. Gateway (v2): `POST /backup/schedules`.
    */
   async createSchedule(options: CreateScheduleOptions): Promise<BackupSchedule> {
-    const { data } = await this.synapCores._getHttpClient().post('/backups/schedules', {
+    const bo: any = options.backup_options || {};
+    const { data } = await this.synapCores._getHttpClient().post('/backup/schedules', {
       name: options.name,
-      cron: options.cron,
-      backup_options: options.backup_options,
-      activate: options.activate !== false,
-      tags: options.tags || [],
+      enabled: options.activate !== false,
+      schedule: {
+        expression: options.cron,
+        timezone: (options as any).timezone || 'UTC',
+      },
+      backup_config: {
+        backup_type: (bo.type || 'full').toLowerCase(),
+        collections: bo.tables,
+        compression: typeof bo.compression === 'string' ? bo.compression : 'zstd',
+        encryption: bo.encrypt || false,
+        retention_days: (options as any).retention_days || 30,
+      },
     });
 
-    return {
-      id: data.id,
-      name: data.name,
-      cron: data.cron,
-      backup_options: data.backup_options,
-      active: data.active,
-      last_run_at: data.last_run_at ? new Date(data.last_run_at) : undefined,
-      next_run_at: data.next_run_at ? new Date(data.next_run_at) : undefined,
-      created_at: new Date(data.created_at),
-      tags: data.tags || [],
-    };
+    return this.mapSchedule(data);
   }
 
   /**
-   * List backup schedules
+   * List backup schedules. Gateway (v2): `GET /backup/schedules`.
    */
   async listSchedules(): Promise<BackupSchedule[]> {
-    const { data } = await this.synapCores._getHttpClient().get('/backups/schedules');
-
-    return (data.schedules || data).map((schedule: any) => ({
-      id: schedule.id,
-      name: schedule.name,
-      cron: schedule.cron,
-      backup_options: schedule.backup_options,
-      active: schedule.active,
-      last_run_at: schedule.last_run_at ? new Date(schedule.last_run_at) : undefined,
-      next_run_at: schedule.next_run_at ? new Date(schedule.next_run_at) : undefined,
-      created_at: new Date(schedule.created_at),
-      tags: schedule.tags || [],
-    }));
+    const { data } = await this.synapCores._getHttpClient().get('/backup/schedules');
+    return (data.schedules || data || []).map((s: any) => this.mapSchedule(s));
   }
 
   /**
-   * Get a specific schedule
+   * Get a specific schedule. Gateway (v2): `GET /backup/schedules/:id`.
    */
   async getSchedule(scheduleId: string): Promise<BackupSchedule> {
     const { data } = await this.synapCores._getHttpClient().get(
-      `/backups/schedules/${scheduleId}`
+      `/backup/schedules/${scheduleId}`,
     );
-
-    return {
-      id: data.id,
-      name: data.name,
-      cron: data.cron,
-      backup_options: data.backup_options,
-      active: data.active,
-      last_run_at: data.last_run_at ? new Date(data.last_run_at) : undefined,
-      next_run_at: data.next_run_at ? new Date(data.next_run_at) : undefined,
-      created_at: new Date(data.created_at),
-      tags: data.tags || [],
-    };
+    return this.mapSchedule(data);
   }
 
   /**
-   * Update a backup schedule
-   */
-  async updateSchedule(
-    scheduleId: string,
-    updates: Partial<CreateScheduleOptions>
-  ): Promise<BackupSchedule> {
-    const { data } = await this.synapCores._getHttpClient().put(
-      `/backups/schedules/${scheduleId}`,
-      updates
-    );
-
-    return {
-      id: data.id,
-      name: data.name,
-      cron: data.cron,
-      backup_options: data.backup_options,
-      active: data.active,
-      last_run_at: data.last_run_at ? new Date(data.last_run_at) : undefined,
-      next_run_at: data.next_run_at ? new Date(data.next_run_at) : undefined,
-      created_at: new Date(data.created_at),
-      tags: data.tags || [],
-    };
-  }
-
-  /**
-   * Delete a backup schedule
+   * Delete a backup schedule. Gateway (v2): `DELETE /backup/schedules/:id`.
    */
   async deleteSchedule(scheduleId: string): Promise<void> {
-    await this.synapCores._getHttpClient().delete(`/backups/schedules/${scheduleId}`);
+    await this.synapCores._getHttpClient().delete(`/backup/schedules/${scheduleId}`);
   }
 
+  // ------------------------------------------------------------------
+  // Removed in gateway v2 — no equivalent route.
+  // ------------------------------------------------------------------
+
   /**
-   * Activate a schedule
+   * @deprecated No schedule-update route in gateway v2. Delete and recreate
+   * the schedule via {@link deleteSchedule} + {@link createSchedule}.
    */
-  async activateSchedule(scheduleId: string): Promise<BackupSchedule> {
-    const { data } = await this.synapCores._getHttpClient().post(
-      `/backups/schedules/${scheduleId}/activate`
+  async updateSchedule(
+    _scheduleId: string,
+    _updates: Partial<CreateScheduleOptions>,
+  ): Promise<BackupSchedule> {
+    throw new NotImplementedError(
+      'client.backup.updateSchedule is removed — gateway v2 has no schedule ' +
+        'update route. Delete and recreate via deleteSchedule() + createSchedule().',
     );
-
-    return {
-      id: data.id,
-      name: data.name,
-      cron: data.cron,
-      backup_options: data.backup_options,
-      active: data.active,
-      last_run_at: data.last_run_at ? new Date(data.last_run_at) : undefined,
-      next_run_at: data.next_run_at ? new Date(data.next_run_at) : undefined,
-      created_at: new Date(data.created_at),
-      tags: data.tags || [],
-    };
   }
 
-  /**
-   * Deactivate a schedule
-   */
-  async deactivateSchedule(scheduleId: string): Promise<BackupSchedule> {
-    const { data } = await this.synapCores._getHttpClient().post(
-      `/backups/schedules/${scheduleId}/deactivate`
+  /** @deprecated No schedule-activate route in gateway v2. */
+  async activateSchedule(_scheduleId: string): Promise<BackupSchedule> {
+    throw new NotImplementedError(
+      'client.backup.activateSchedule is removed — gateway v2 has no ' +
+        'activate route. Recreate the schedule with enabled=true.',
     );
-
-    return {
-      id: data.id,
-      name: data.name,
-      cron: data.cron,
-      backup_options: data.backup_options,
-      active: data.active,
-      last_run_at: data.last_run_at ? new Date(data.last_run_at) : undefined,
-      next_run_at: data.next_run_at ? new Date(data.next_run_at) : undefined,
-      created_at: new Date(data.created_at),
-      tags: data.tags || [],
-    };
   }
 
-  /**
-   * Get backup metrics
-   */
+  /** @deprecated No schedule-deactivate route in gateway v2. */
+  async deactivateSchedule(_scheduleId: string): Promise<BackupSchedule> {
+    throw new NotImplementedError(
+      'client.backup.deactivateSchedule is removed — gateway v2 has no ' +
+        'deactivate route. Delete the schedule via deleteSchedule().',
+    );
+  }
+
+  /** @deprecated No backup-cancel route in gateway v2. */
+  async cancelBackup(_backupId: string): Promise<void> {
+    throw new NotImplementedError(
+      'client.backup.cancelBackup is removed — gateway v2 has no cancel route.',
+    );
+  }
+
+  /** @deprecated No restore-cancel route in gateway v2. */
+  async cancelRestore(_restoreId: string): Promise<void> {
+    throw new NotImplementedError(
+      'client.backup.cancelRestore is removed — gateway v2 has no cancel route.',
+    );
+  }
+
+  /** @deprecated No backup-verify route in gateway v2. */
+  async verify(_backupId: string): Promise<BackupVerificationResult> {
+    throw new NotImplementedError(
+      'client.backup.verify is removed — gateway v2 has no verify route.',
+    );
+  }
+
+  /** @deprecated No backup-metrics route in gateway v2. */
   async getMetrics(): Promise<BackupMetrics> {
-    const { data } = await this.synapCores._getHttpClient().get('/backups/metrics');
-
-    return {
-      total_backups: data.total_backups || 0,
-      total_size_bytes: data.total_size_bytes || 0,
-      successful_backups: data.successful_backups || 0,
-      failed_backups: data.failed_backups || 0,
-      avg_backup_size_bytes: data.avg_backup_size_bytes || 0,
-      avg_duration_ms: data.avg_duration_ms || 0,
-      last_backup_at: data.last_backup_at ? new Date(data.last_backup_at) : undefined,
-      next_scheduled_at: data.next_scheduled_at
-        ? new Date(data.next_scheduled_at)
-        : undefined,
-    };
+    throw new NotImplementedError(
+      'client.backup.getMetrics is removed — gateway v2 has no metrics route. ' +
+        'Aggregate client.backup.list() client-side instead.',
+    );
   }
 
-  /**
-   * Map raw backup data to Backup type
-   */
+  // ------------------------------------------------------------------
+  // Mappers
+  // ------------------------------------------------------------------
+
   private mapBackup(data: any): Backup {
+    const collections: string[] = Array.isArray(data.collections) ? data.collections : [];
     return {
       id: data.id,
       name: data.name,
       description: data.description,
-      type: data.type,
+      type: data.backup_type || data.type,
       status: data.status,
       size_bytes: data.size_bytes,
       compressed_size_bytes: data.compressed_size_bytes,
-      table_count: data.table_count,
-      created_at: new Date(data.created_at),
+      table_count: data.table_count ?? collections.length,
+      created_at: data.created_at ? new Date(data.created_at) : new Date(),
       completed_at: data.completed_at ? new Date(data.completed_at) : undefined,
       duration_ms: data.duration_ms || data.took_ms,
       storage: data.storage,
       storage_path: data.storage_path,
-      encrypted: data.encrypted || false,
+      encrypted: data.encrypted ?? data.encryption ?? false,
       tags: data.tags || [],
       parent_backup_id: data.parent_backup_id,
-      error: data.error,
-    };
+      error: data.error || data.error_message,
+    } as Backup;
+  }
+
+  private mapSchedule(data: any): BackupSchedule {
+    return {
+      id: data.id,
+      name: data.name,
+      cron: data.schedule?.expression ?? data.cron,
+      backup_options: data.backup_config ?? data.backup_options,
+      active: data.enabled ?? data.active,
+      last_run_at: data.last_run ? new Date(data.last_run) : undefined,
+      next_run_at: data.next_run ? new Date(data.next_run) : undefined,
+      created_at: data.created_at ? new Date(data.created_at) : new Date(),
+      tags: data.tags || [],
+    } as BackupSchedule;
   }
 }

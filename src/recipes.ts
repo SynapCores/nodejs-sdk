@@ -171,7 +171,23 @@ export class RecipeClient {
    * List available recipe categories
    */
   async listCategories(): Promise<string[]> {
-    const { data } = await this.synapCores._getHttpClient().get('/recipes/categories');
-    return data.categories || [];
+    // Gateway serves category counts at /recipes/categories/counts. Accept
+    // either an object map `{ category: count }` or an array of names / rows.
+    const { data } = await this.synapCores._getHttpClient().get(
+      '/recipes/categories/counts',
+    );
+    if (Array.isArray(data)) {
+      return data.map((c: any) => (typeof c === 'string' ? c : c.category ?? c.name));
+    }
+    if (data && Array.isArray(data.categories)) {
+      return data.categories.map((c: any) =>
+        typeof c === 'string' ? c : c.category ?? c.name,
+      );
+    }
+    if (data && typeof data === 'object') {
+      // `{ "analytics": 3, "etl": 5 }` → ["analytics", "etl"]
+      return Object.keys(data.counts ?? data);
+    }
+    return [];
   }
 }
