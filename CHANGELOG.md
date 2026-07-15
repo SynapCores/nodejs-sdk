@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.6.1
+
+Docs-only. README aligned with the 0.6.0 gateway-v2 reconciliation: removed
+deprecated examples (vector-algebra helpers, `batch*`, `refreshToken`,
+`nlp.analyze`, `collection.search`) that now throw `NotImplementedError`, added a
+"Removed method → Use instead" migration table, corrected auth to
+`Authorization: Bearer`, fixed `embed()` to `/ai/embeddings`, and documented the
+recipes / prepared-statements / schema surfaces. No code or API changes vs 0.6.0.
+
 ## 0.6.0
 
 Full route reconciliation against the gateway v2 API surface (the default

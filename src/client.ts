@@ -126,7 +126,7 @@ export class SynapCores {
       timeout: this.config.timeout,
       headers: {
         'Content-Type': 'application/json',
-        'User-Agent': 'synapcores-nodejs/0.6.0',
+        'User-Agent': 'synapcores-nodejs/0.6.1',
         ...authHeader,
       },
       ...(httpsAgent && { httpsAgent }),

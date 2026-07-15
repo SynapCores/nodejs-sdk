@@ -1965,7 +1965,7 @@ var _SynapCores = class _SynapCores {
       timeout: this.config.timeout,
       headers: {
         "Content-Type": "application/json",
-        "User-Agent": "synapcores-nodejs/0.6.0",
+        "User-Agent": "synapcores-nodejs/0.6.1",
         ...authHeader
       },
       ...httpsAgent && { httpsAgent }
@@ -2867,7 +2867,7 @@ var SynapCores = _SynapCores;
 
 // src/index.ts
 import { z } from "zod";
-var VERSION = "0.6.0";
+var VERSION = "0.6.1";
 export {
   AuthenticationError,
   AutoMLClient,

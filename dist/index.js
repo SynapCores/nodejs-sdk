@@ -2021,7 +2021,7 @@ var _SynapCores = class _SynapCores {
       timeout: this.config.timeout,
       headers: {
         "Content-Type": "application/json",
-        "User-Agent": "synapcores-nodejs/0.6.0",
+        "User-Agent": "synapcores-nodejs/0.6.1",
         ...authHeader
       },
       ...httpsAgent && { httpsAgent }
@@ -2923,7 +2923,7 @@ var SynapCores = _SynapCores;
 
 // src/index.ts
 var import_zod = require("zod");
-var VERSION = "0.6.0";
+var VERSION = "0.6.1";
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
   AuthenticationError,
